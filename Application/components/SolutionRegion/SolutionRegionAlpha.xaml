@@ -1,0 +1,196 @@
+<UserControl x:Class="SnapEye.SolutionRegion.SolutionRegionAlpha"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:markdig="clr-namespace:Markdig.Wpf;assembly=Markdig.Wpf">
+    
+    <UserControl.Resources>
+        <!-- Markdown Styles -->
+        <Style TargetType="Paragraph">
+            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Margin" Value="0,0,0,6"/>
+        </Style>
+        
+        <Style TargetType="Run">
+            <Setter Property="Foreground" Value="#FFFFFF"/>
+        </Style>
+        
+        <Style TargetType="Section">
+            <Setter Property="Background" Value="#252525"/>
+            <Setter Property="Padding" Value="8"/>
+            <Setter Property="Margin" Value="0,0,0,6"/>
+        </Style>
+        
+        <Style x:Key="CodeBlockStyle" TargetType="Section">
+            <Setter Property="Background" Value="#1A1A1A"/>
+            <Setter Property="BorderBrush" Value="#B794F7"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8"/>
+            <Setter Property="Margin" Value="0,0,0,6"/>
+        </Style>
+        
+        <Style TargetType="Inline" x:Key="CodeStyle">
+            <Setter Property="Background" Value="#2A2A2A"/>
+            <Setter Property="Foreground" Value="#B794F7"/>
+            <Setter Property="FontFamily" Value="Consolas, Courier New"/>
+        </Style>
+        
+        <!-- Tab Button Style -->
+        <Style x:Key="TabButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#888888"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="12,6"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="Medium"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" 
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6,6,0,0"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#2A2A2A"/>
+                    <Setter Property="Foreground" Value="#CCCCCC"/>
+                </Trigger>
+                <Trigger Property="Tag" Value="Active">
+                    <Setter Property="Background" Value="#B794F7"/>
+                    <Setter Property="Foreground" Value="#FFFFFF"/>
+                    <Setter Property="FontWeight" Value="SemiBold"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        
+        <!-- Scrollbar Style -->
+        <Style x:Key="CustomScrollBar" TargetType="ScrollBar">
+            <Setter Property="Background" Value="#1A1A1A"/>
+            <Setter Property="Width" Value="6"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Grid>
+                            <Border Background="{TemplateBinding Background}" CornerRadius="3"/>
+                            <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                <Track.Thumb>
+                                    <Thumb>
+                                        <Thumb.Style>
+                                            <Style TargetType="Thumb">
+                                                <Setter Property="Background" Value="#B794F7"/>
+                                                <Setter Property="Template">
+                                                    <Setter.Value>
+                                                        <ControlTemplate TargetType="Thumb">
+                                                            <Border Background="{TemplateBinding Background}" CornerRadius="3"/>
+                                                        </ControlTemplate>
+                                                    </Setter.Value>
+                                                </Setter>
+                                                <Style.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter Property="Background" Value="#D4B5FF"/>
+                                                    </Trigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Thumb.Style>
+                                    </Thumb>
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </UserControl.Resources>
+    
+    <Border x:Name="AlphaRegionBorder"
+            CornerRadius="12"
+            Padding="8"
+            Width="700"
+            Height="300"
+            BorderThickness="1">
+        
+        <!-- Glassmorphism Background -->
+        <Border.Background>
+            <SolidColorBrush Color="#CC1A1A1A" Opacity="0.6"/>
+        </Border.Background>
+        
+        <!-- Light Purple Glossy Border -->
+        <Border.BorderBrush>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Color="#60B794F7" Offset="0"/>
+                <GradientStop Color="#30B794F7" Offset="1"/>
+            </LinearGradientBrush>
+        </Border.BorderBrush>
+        
+        <!-- Subtle Shadow -->
+        <Border.Effect>
+            <DropShadowEffect Color="#B794F7" Direction="0" 
+                              ShadowDepth="0" BlurRadius="20" Opacity="0.3"/>
+        </Border.Effect>
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            
+            <!-- Tab Headers -->
+            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
+                <Button x:Name="ChatTab" 
+                        Content="💬 Chat" 
+                        Style="{StaticResource TabButtonStyle}"
+                        Tag="Active"
+                        Click="ChatTab_Click"/>
+                <Button x:Name="TranscriptionTab" 
+                        Content="🎤 Transcription" 
+                        Style="{StaticResource TabButtonStyle}"
+                        Click="TranscriptionTab_Click"
+                        Margin="4,0,0,0"/>
+            </StackPanel>
+            
+            <!-- Tab Content -->
+            <Grid Grid.Row="1">
+                <!-- Chat View -->
+                <ScrollViewer x:Name="ChatView" 
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled"
+                              Visibility="Visible">
+                    <ScrollViewer.Resources>
+                        <Style TargetType="ScrollBar" BasedOn="{StaticResource CustomScrollBar}"/>
+                    </ScrollViewer.Resources>
+                    
+                    <markdig:MarkdownViewer x:Name="MarkdownViewer"
+                                            Background="Transparent"
+                                            Margin="4,0"
+                                            Markdown="**Welcome to SnapEye AI!**"/>
+                </ScrollViewer>
+                
+                <!-- Transcription View -->
+                <ScrollViewer x:Name="TranscriptionView"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled"
+                              Visibility="Collapsed">
+                    <ScrollViewer.Resources>
+                        <Style TargetType="ScrollBar" BasedOn="{StaticResource CustomScrollBar}"/>
+                    </ScrollViewer.Resources>
+                    
+                    <StackPanel x:Name="TranscriptionPanel" Margin="4,0">
+                        <!-- Transcription messages will be added here dynamically -->
+                        <TextBlock Text="🎤 Transcription session ready. Start speaking..." 
+                                   Foreground="#888888"
+                                   FontSize="11"
+                                   FontStyle="Italic"
+                                   Margin="0,4"/>
+                    </StackPanel>
+                </ScrollViewer>
+            </Grid>
+        </Grid>
+        
+    </Border>
+</UserControl>

@@ -1,0 +1,61 @@
+<Window x:Class="SnapEye.OverlayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:nav="clr-namespace:SnapEye.Nav"
+        xmlns:solution="clr-namespace:SnapEye.SolutionRegion"
+        xmlns:settings="clr-namespace:SnapEye.Settings"
+        Title="SnapEye Overlay" 
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        MouseDown="Window_MouseDown">
+    
+    <StackPanel Margin="10">
+        <!-- Navigation Bar with Glassmorphism -->
+        <Border CornerRadius="20"
+                Padding="15,10"
+                Margin="0,0,0,10"
+                Width="380"
+                BorderThickness="1">
+            
+            <!-- Glassmorphism Background -->
+            <Border.Background>
+                <SolidColorBrush Color="#CC1A1A1A" Opacity="0.6"/>
+            </Border.Background>
+            
+            <!-- Light Purple Glossy Border -->
+            <Border.BorderBrush>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                    <GradientStop Color="#60B794F7" Offset="0"/>
+                    <GradientStop Color="#30B794F7" Offset="1"/>
+                </LinearGradientBrush>
+            </Border.BorderBrush>
+            
+            <!-- Subtle Shadow -->
+            <Border.Effect>
+                <DropShadowEffect Color="#B794F7" Direction="0" 
+                                  ShadowDepth="0" BlurRadius="20" Opacity="0.3"/>
+            </Border.Effect>
+            
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <nav:ListenButton x:Name="ListenBtn" Grid.Column="0" Margin="0,0,8,0"/>
+                <nav:CameraButton x:Name="CameraBtn" Grid.Column="1" Margin="0,0,8,0"/>
+                <nav:PopupRangeSlider x:Name="OpacitySlider" Grid.Column="2" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                <settings:SettingsControl x:Name="SettingsCtrl" Grid.Column="3" Margin="8,0,0,0" VerticalAlignment="Center"/>
+            </Grid>
+        </Border>
+        
+        <!-- Alpha Region (700×300) -->
+        <solution:SolutionRegionAlpha x:Name="AlphaRegion"/>
+    </StackPanel>
+</Window>
