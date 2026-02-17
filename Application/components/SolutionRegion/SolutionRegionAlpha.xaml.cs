@@ -1,255 +1,367 @@
+using System;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace SnapEye.SolutionRegion
 {
     public partial class SolutionRegionAlpha : UserControl
     {
+        // Streaming state
+        private readonly StringBuilder streamingBuffer = new();
+        private bool isStreamingResponse;
+        private DispatcherTimer? typingTimer;
+
+        // Transcription state
+        private Border? lastUserBubble;
+        private TextBlock? lastUserText;
+        private Border? lastSystemBubble;
+        private TextBlock? lastSystemText;
+        private bool newUserSegment = true;
+        private bool newSystemSegment = true;
+        private bool hasPlaceholder = true;
+
+        // Theme colors (from config or defaults)
+        private static readonly Color AccentColor = (Color)ColorConverter.ConvertFromString("#6C5CE7");
+        private static readonly Color UserBubbleColor = (Color)ColorConverter.ConvertFromString("#6C5CE7");
+        private static readonly Color SystemBubbleColor = (Color)ColorConverter.ConvertFromString("#2D2D4E");
+        private static readonly Color TextColor = (Color)ColorConverter.ConvertFromString("#E0E0E0");
+
         public SolutionRegionAlpha()
         {
             InitializeComponent();
-            
-            // Set default markdown content
-            SetMarkdownContent("**Welcome to SnapEye AI Assistant!**\n\nAwaiting your request...");
         }
 
         #region Tab Switching
-        
-        private void ChatTab_Click(object sender, RoutedEventArgs e)
+
+        public void SwitchToChatTab()
         {
-            // Activate Chat tab
-            ChatTab.Tag = "Active";
-            TranscriptionTab.Tag = null;
-            
-            // Show Chat view, hide Transcription view
-            ChatView.Visibility = Visibility.Visible;
-            TranscriptionView.Visibility = Visibility.Collapsed;
+            SafeInvoke(() =>
+            {
+                ChatView.Visibility = Visibility.Visible;
+                TranscriptionView.Visibility = Visibility.Collapsed;
+            });
         }
 
-        private void TranscriptionTab_Click(object sender, RoutedEventArgs e)
+        public void SwitchToTranscriptionTab()
         {
-            // Activate Transcription tab
-            ChatTab.Tag = null;
-            TranscriptionTab.Tag = "Active";
-            
-            // Show Transcription view, hide Chat view
-            ChatView.Visibility = Visibility.Collapsed;
-            TranscriptionView.Visibility = Visibility.Visible;
+            SafeInvoke(() =>
+            {
+                ChatView.Visibility = Visibility.Collapsed;
+                TranscriptionView.Visibility = Visibility.Visible;
+            });
         }
 
         #endregion
 
-        #region Opacity Control
+        #region Chat / AI Content
 
-        // Method to update the region's opacity
-        public void UpdateOpacity(double opacityValue)
+        public void SetMarkdownContent(string markdown)
         {
-            // Apply opacity to the border background
-            if (AlphaRegionBorder != null)
+            SafeInvoke(() =>
             {
-                AlphaRegionBorder.Opacity = opacityValue;
-            }
+                if (MarkdownViewer != null)
+                    MarkdownViewer.Markdown = markdown ?? "";
+            });
         }
 
-        #endregion
-
-        #region Chat Methods
-
-        // Method to set markdown content
-        public void SetMarkdownContent(string markdownText)
+        public void AppendMarkdownContent(string markdown)
         {
-            if (MarkdownViewer != null)
+            SafeInvoke(() =>
             {
-                MarkdownViewer.Markdown = markdownText;
-            }
+                if (MarkdownViewer != null)
+                    MarkdownViewer.Markdown += "\n\n" + markdown;
+            });
         }
 
-        // Method to append markdown content
-        public void AppendMarkdownContent(string markdownText)
-        {
-            if (MarkdownViewer != null)
-            {
-                MarkdownViewer.Markdown += "\n\n" + markdownText;
-            }
-        }
-
-        // Method to clear content
         public void ClearContent()
         {
-            if (MarkdownViewer != null)
+            SafeInvoke(() =>
             {
-                MarkdownViewer.Markdown = string.Empty;
-            }
+                if (MarkdownViewer != null)
+                    MarkdownViewer.Markdown = "";
+            });
         }
 
-        // Method to show AI response with formatted markdown
         public void ShowAIResponse(string response)
         {
-            if (MarkdownViewer != null)
-            {
-                // Format the response with better styling
-                string formattedResponse = $"## AI Response\n\n{response}";
-                MarkdownViewer.Markdown = formattedResponse;
-            }
+            SafeInvoke(() => SetMarkdownContent($"## AI Response\n\n{response}"));
         }
 
-        // Method to show loading state
         public void ShowLoading()
         {
-            if (MarkdownViewer != null)
-            {
-                MarkdownViewer.Markdown = "⏳ **Processing your request...**\n\nPlease wait while the AI generates a response.";
-            }
+            SafeInvoke(() => SetMarkdownContent("**Processing...**\n\nPlease wait while the AI generates a response."));
         }
 
-        // Method to show error
-        public void ShowError(string errorMessage)
+        public void ShowError(string error)
         {
-            if (MarkdownViewer != null)
-            {
-                MarkdownViewer.Markdown = $"❌ **Error**\n\n{errorMessage}";
-            }
-        }
-
-        // Example method to show sample AI response
-        public void ShowSampleResponse()
-        {
-            string sampleMarkdown = @"# Hello from SnapEye AI! 👁️
-                                      ## Quick Analysis
-
-                                  Here's what I found:
-
-### Key Points
-- **Point 1**: This is an important observation
-- **Point 2**: Another significant detail
-- **Point 3**: Final key insight
-
-### Code Example
-```csharp
-public void Example()
-{
-    Console.WriteLine(""Hello, SnapEye!"");
-}
-```
-
-### Next Steps
-1. Review the findings
-2. Take appropriate action
-3. Monitor results
-
-> **Tip**: You can adjust the opacity using the slider above!
-
----
-*Powered by AI Vision Technology*";
-
-            SetMarkdownContent(sampleMarkdown);
+            SafeInvoke(() => SetMarkdownContent($"**Error**\n\n{error}"));
         }
 
         #endregion
 
-        #region Transcription Methods
+        #region Streaming AI Response
 
-        // Method to add a user message (right side)
-        public void AddUserTranscription(string text)
+        public void BeginStreamingResponse(string? question = null)
         {
-            if (TranscriptionPanel != null)
+            SafeInvoke(() =>
             {
-                var messageContainer = new Grid
+                SwitchToChatTab();
+                isStreamingResponse = true;
+                streamingBuffer.Clear();
+
+                string header = "## AI Suggestion";
+                if (!string.IsNullOrEmpty(question))
+                    header += $"\n> {question}";
+                header += "\n\n";
+
+                streamingBuffer.Append(header);
+                SetMarkdownContent(streamingBuffer.ToString() + "...");
+                ShowTypingIndicator();
+            });
+        }
+
+        public void AppendStreamingToken(string token)
+        {
+            SafeInvoke(() =>
+            {
+                if (!isStreamingResponse) return;
+                streamingBuffer.Append(token);
+                SetMarkdownContent(streamingBuffer.ToString());
+            });
+        }
+
+        public void EndStreamingResponse(string? fullResponse = null)
+        {
+            SafeInvoke(() =>
+            {
+                isStreamingResponse = false;
+                HideTypingIndicator();
+
+                if (!string.IsNullOrEmpty(fullResponse))
                 {
-                    Margin = new Thickness(0, 4, 0, 4)
-                };
-
-                messageContainer.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-                messageContainer.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2, GridUnitType.Star) });
-
-                var messageBorder = new Border
+                    string header = streamingBuffer.ToString();
+                    int idx = header.IndexOf("\n\n");
+                    if (idx > 0)
+                        SetMarkdownContent(header.Substring(0, idx + 2) + fullResponse);
+                    else
+                        SetMarkdownContent("## AI Suggestion\n\n" + fullResponse);
+                }
+                else
                 {
-                    Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2A2A2A")),
-                    BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#B794F7")),
-                    BorderThickness = new Thickness(1),
-                    CornerRadius = new CornerRadius(8),
-                    Padding = new Thickness(8, 6, 8, 6)
-                };
+                    SetMarkdownContent(streamingBuffer.ToString());
+                }
+                streamingBuffer.Clear();
+            });
+        }
 
-                var textBlock = new TextBlock
-                {
-                    Text = text,
-                    Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FFFFFF")),
-                    FontSize = 11,
-                    TextWrapping = TextWrapping.Wrap
-                };
+        public void ShowStreamingError(string error)
+        {
+            SafeInvoke(() =>
+            {
+                isStreamingResponse = false;
+                HideTypingIndicator();
+                SetMarkdownContent($"## AI Suggestion\n\n**Error:** {error}");
+                streamingBuffer.Clear();
+            });
+        }
 
-                messageBorder.Child = textBlock;
-                Grid.SetColumn(messageBorder, 1);
-                messageContainer.Children.Add(messageBorder);
+        private void ShowTypingIndicator()
+        {
+            typingTimer?.Stop();
+            typingTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            int dots = 0;
+            typingTimer.Tick += (s, e) =>
+            {
+                if (!isStreamingResponse) { typingTimer.Stop(); return; }
+                dots = (dots + 1) % 4;
+                SetMarkdownContent(streamingBuffer.ToString() + new string('.', dots));
+            };
+            typingTimer.Start();
+        }
 
-                TranscriptionPanel.Children.Add(messageContainer);
-                
-                // Auto-scroll to bottom
-                TranscriptionView.ScrollToEnd();
+        private void HideTypingIndicator()
+        {
+            typingTimer?.Stop();
+            typingTimer = null;
+        }
+
+        #endregion
+
+        #region Transcription Display
+
+        private void RemovePlaceholder()
+        {
+            if (hasPlaceholder && TranscriptPlaceholder != null)
+            {
+                TranscriptPlaceholder.Visibility = Visibility.Collapsed;
+                hasPlaceholder = false;
             }
         }
 
-        // Method to add a system message (left side)
-        public void AddSystemTranscription(string text)
+        public void AddUserTranscription(string text, bool isNewSegment = false)
         {
-            if (TranscriptionPanel != null)
+            SafeInvoke(() =>
             {
-                var messageContainer = new Grid
+                if (TranscriptionPanel == null || string.IsNullOrWhiteSpace(text)) return;
+                RemovePlaceholder();
+
+                if (isNewSegment || newUserSegment || lastUserBubble == null)
                 {
-                    Margin = new Thickness(0, 4, 0, 4)
-                };
+                    var (container, border, textBlock) = CreateBubble(text, isUser: true, highlight: isNewSegment);
+                    TranscriptionPanel.Children.Add(container);
+                    lastUserBubble = border;
+                    lastUserText = textBlock;
+                    newUserSegment = false;
 
-                messageContainer.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2, GridUnitType.Star) });
-                messageContainer.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-                var messageBorder = new Border
+                    if (isNewSegment)
+                        FadeHighlight(border, isUser: true);
+                }
+                else if (lastUserText != null)
                 {
-                    Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#1A1A1A")),
-                    BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#888888")),
-                    BorderThickness = new Thickness(1),
-                    CornerRadius = new CornerRadius(8),
-                    Padding = new Thickness(8, 6, 8, 6)
-                };
-
-                var textBlock = new TextBlock
-                {
-                    Text = text,
-                    Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FFFFFF")),
-                    FontSize = 11,
-                    TextWrapping = TextWrapping.Wrap
-                };
-
-                messageBorder.Child = textBlock;
-                Grid.SetColumn(messageBorder, 0);
-                messageContainer.Children.Add(messageBorder);
-
-                TranscriptionPanel.Children.Add(messageContainer);
-                
-                // Auto-scroll to bottom
-                TranscriptionView.ScrollToEnd();
-            }
+                    lastUserText.Text += " " + text;
+                }
+                TranscriptionView?.ScrollToEnd();
+            });
         }
 
-        // Method to clear transcription
+        public void AddSystemTranscription(string text, bool isNewSegment = false)
+        {
+            SafeInvoke(() =>
+            {
+                if (TranscriptionPanel == null || string.IsNullOrWhiteSpace(text)) return;
+                RemovePlaceholder();
+
+                if (isNewSegment || newSystemSegment || lastSystemBubble == null)
+                {
+                    var (container, border, textBlock) = CreateBubble(text, isUser: false, highlight: isNewSegment);
+                    TranscriptionPanel.Children.Add(container);
+                    lastSystemBubble = border;
+                    lastSystemText = textBlock;
+                    newSystemSegment = false;
+
+                    if (isNewSegment)
+                        FadeHighlight(border, isUser: false);
+                }
+                else if (lastSystemText != null)
+                {
+                    lastSystemText.Text += " " + text;
+                }
+                TranscriptionView?.ScrollToEnd();
+            });
+        }
+
+        public void MarkNextAsNewSegment()
+        {
+            newUserSegment = true;
+            newSystemSegment = true;
+        }
+
         public void ClearTranscription()
         {
-            if (TranscriptionPanel != null)
+            SafeInvoke(() =>
             {
+                if (TranscriptionPanel == null) return;
                 TranscriptionPanel.Children.Clear();
-                
-                // Add default message
-                var defaultText = new TextBlock
-                {
-                    Text = "🎤 Transcription session ready. Start speaking...",
-                    Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#888888")),
-                    FontSize = 11,
-                    FontStyle = FontStyles.Italic,
-                    Margin = new Thickness(0, 4, 0, 0)
-                };
-                
-                TranscriptionPanel.Children.Add(defaultText);
+                lastUserBubble = null; lastUserText = null;
+                lastSystemBubble = null; lastSystemText = null;
+                newUserSegment = true;
+                newSystemSegment = true;
+
+                if (TranscriptPlaceholder != null)
+                    TranscriptPlaceholder.Visibility = Visibility.Visible;
+                hasPlaceholder = true;
+            });
+        }
+
+        private (Grid container, Border border, TextBlock textBlock) CreateBubble(string text, bool isUser, bool highlight)
+        {
+            var container = new Grid { Margin = new Thickness(0, 3, 0, 3) };
+            container.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            container.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2.5, GridUnitType.Star) });
+
+            Color bubbleColor = highlight
+                ? (isUser ? UserBubbleColor : SystemBubbleColor)
+                : (Color)ColorConverter.ConvertFromString("#15FFFFFF");
+
+            var border = new Border
+            {
+                Background = new SolidColorBrush(bubbleColor) { Opacity = highlight ? 0.6 : 1.0 },
+                BorderBrush = new SolidColorBrush(isUser ? UserBubbleColor : SystemBubbleColor) { Opacity = 0.5 },
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(10, 6, 10, 6)
+            };
+
+            var textBlock = new TextBlock
+            {
+                Text = text,
+                Foreground = new SolidColorBrush(TextColor),
+                FontSize = 11,
+                TextWrapping = TextWrapping.Wrap,
+                FontFamily = new FontFamily("Segoe UI"),
+            };
+
+            border.Child = textBlock;
+
+            // User = right column, System = left column
+            Grid.SetColumn(border, isUser ? 1 : 0);
+            container.Children.Add(border);
+
+            // Source label
+            var label = new TextBlock
+            {
+                Text = isUser ? "You" : "Other",
+                FontSize = 9,
+                Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#555555")),
+                Margin = new Thickness(isUser ? 0 : 4, 0, isUser ? 4 : 0, 0),
+                HorizontalAlignment = isUser ? HorizontalAlignment.Right : HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Bottom,
+            };
+            Grid.SetColumn(label, isUser ? 0 : 1);
+            container.Children.Add(label);
+
+            return (container, border, textBlock);
+        }
+
+        private void FadeHighlight(Border border, bool isUser)
+        {
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            timer.Tick += (s, e) =>
+            {
+                border.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#15FFFFFF"));
+                timer.Stop();
+            };
+            timer.Start();
+        }
+
+        #endregion
+
+        #region Opacity
+
+        public void UpdateOpacity(double value)
+        {
+            // Not used in new design (opacity controlled at window level)
+        }
+
+        #endregion
+
+        #region Helpers
+
+        private void SafeInvoke(Action action)
+        {
+            try
+            {
+                if (Dispatcher.CheckAccess())
+                    action();
+                else
+                    Dispatcher.Invoke(action);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SolutionRegion] UI error: {ex.Message}");
             }
         }
 

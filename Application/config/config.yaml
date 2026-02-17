@@ -1,0 +1,89 @@
+# SnapEye AI - Application Configuration
+# All settings are loaded from this file at startup.
+# Environment variables override these values when set.
+
+app:
+  name: "SnapEye AI"
+  version: "2.0.0"
+
+backend:
+  http_url: "http://localhost:8080"
+  websocket_url: "ws://localhost:8080"
+
+auth:
+  default_username: "snapeye_user"
+  default_api_key: "sk-test-api-key-1234567890"
+  session_expiry_days: 90
+
+audio:
+  buffer_size: 4096
+  sample_rate: 24000
+  channels: 1
+  encoding: "pcm16"
+
+transcription:
+  model: "nova-3"
+  language: "en"
+  pause_threshold: 0.5
+  endpointing_ms: 500
+  smart_format: true
+  punctuate: true
+  diarize: true
+
+ui:
+  width: 380
+  height: 620
+  opacity: 0.95
+  min_opacity: 0.3
+  max_opacity: 1.0
+  corner_radius: 16
+  invisible_to_capture: true
+  accent_color: "#6C5CE7"
+  accent_color_light: "#A29BFE"
+  background_primary: "#1A1A2E"
+  background_secondary: "#16213E"
+  background_card: "#0F3460"
+  text_primary: "#FFFFFF"
+  text_secondary: "#B0B0B0"
+  text_muted: "#666666"
+  border_color: "#2D2D4E"
+  success_color: "#00B894"
+  error_color: "#FF6B6B"
+  warning_color: "#FDCB6E"
+
+modes:
+  - name: "General Assistant"
+    icon: "brain"
+    system_prompt: "You are SnapEye, a helpful AI meeting assistant. Provide concise, actionable answers."
+  - name: "Interview Mode"
+    icon: "briefcase"
+    system_prompt: "You are helping the user during a job interview. Suggest strong answers, talking points, and relevant experiences. Be encouraging and strategic."
+  - name: "Sales Mode"
+    icon: "chart"
+    system_prompt: "You are helping the user during a sales call. Detect objections, suggest rebuttals, highlight value propositions, and guide toward closing."
+  - name: "Meeting Notes"
+    icon: "clipboard"
+    system_prompt: "You are a meeting note-taker. Summarize key points, action items, decisions, and follow-ups as the conversation progresses."
+  - name: "Customer Support"
+    icon: "headset"
+    system_prompt: "You are helping the user handle a customer support interaction. Suggest empathetic responses, troubleshooting steps, and escalation paths."
+
+quick_actions:
+  - label: "What should I say?"
+    prompt: "Based on the conversation transcript, suggest what I should say next. Be specific and natural."
+  - label: "Follow up"
+    prompt: "Based on the conversation, suggest 2-3 good follow-up questions I could ask."
+  - label: "Fact check"
+    prompt: "Review the recent conversation and verify any claims or facts mentioned. Flag anything that seems inaccurate."
+  - label: "Who am I talking to?"
+    prompt: "Based on the conversation, describe who I am talking to - their role, interests, and communication style."
+  - label: "Recap"
+    prompt: "Provide a brief recap of the conversation so far, highlighting key topics and decisions."
+
+keyboard_shortcuts:
+  toggle_listen: "Ctrl+Shift+L"
+  screenshot: "Ctrl+Shift+S"
+  hide_show: "Ctrl+Shift+H"
+  ask_ai: "Ctrl+Enter"
+  move_left: "Ctrl+Left"
+  move_right: "Ctrl+Right"
