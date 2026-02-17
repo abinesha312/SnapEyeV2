@@ -4,6 +4,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Shapes;
 using System.Windows.Threading;
 using SnapEye.Services;
 using SnapEye.Models;
@@ -30,10 +32,15 @@ namespace SnapEye
         // State
         private bool isTranscribing;
         private bool isInvisibleToCapture;
+        private bool isExpanded = true;
         private SessionManager.SessionData? currentSession;
         private int selectedModeIndex;
         private DispatcherTimer? sessionTimer;
         private DateTime sessionStartTime;
+
+        // Pulse animation for live dot
+        private DispatcherTimer? liveDotPulseTimer;
+        private bool liveDotVisible = true;
 
         public OverlayWindow()
         {
@@ -70,12 +77,14 @@ namespace SnapEye
                 EnableScreenShareInvisibility();
 
             this.Opacity = AppConfig.DefaultOpacity;
+            OpacitySlider.Value = AppConfig.DefaultOpacity;
         }
 
         private void InitializeWindowPosition()
         {
-            this.Left = SystemParameters.PrimaryScreenWidth - this.Width - 20;
-            this.Top = 60;
+            // Position at top center of screen
+            this.Left = (SystemParameters.PrimaryScreenWidth - this.Width) / 2;
+            this.Top = 20;
         }
 
         private void SubscribeToEvents()
@@ -166,11 +175,24 @@ namespace SnapEye
                 {
                     bool success = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
                     isInvisibleToCapture = success;
+                    UpdateStealthIcon();
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[UI] Invisibility error: {ex.Message}");
+            }
+        }
+
+        private void UpdateStealthIcon()
+        {
+            if (isInvisibleToCapture)
+            {
+                StealthIcon.Fill = new SolidColorBrush(Color.FromRgb(0x2D, 0x7F, 0xF9));
+            }
+            else
+            {
+                StealthIcon.Fill = new SolidColorBrush(Color.FromRgb(0x9C, 0xA3, 0xAF));
             }
         }
 
@@ -223,7 +245,32 @@ namespace SnapEye
 
         #endregion
 
-        #region Navbar Events
+        #region Toolbar Events
+
+        private void Stealth_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var hwnd = new WindowInteropHelper(this).Handle;
+                if (hwnd == IntPtr.Zero) return;
+
+                if (isInvisibleToCapture)
+                {
+                    SetWindowDisplayAffinity(hwnd, WDA_NONE);
+                    isInvisibleToCapture = false;
+                }
+                else
+                {
+                    SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+                    isInvisibleToCapture = true;
+                }
+                UpdateStealthIcon();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] Stealth toggle error: {ex.Message}");
+            }
+        }
 
         private async void MicToggle_Click(object? sender, RoutedEventArgs e)
         {
@@ -241,21 +288,79 @@ namespace SnapEye
             }
         }
 
-        private async void EndSession_Click(object sender, MouseButtonEventArgs e)
+        private void ExpandToggle_Click(object sender, RoutedEventArgs e)
         {
             try
             {
-                await StopTranscriptionAsync();
+                isExpanded = !isExpanded;
+                ContentPanel.Visibility = isExpanded ? Visibility.Visible : Visibility.Collapsed;
+                InputBar.Visibility = isExpanded ? Visibility.Visible : Visibility.Collapsed;
+
+                // Update chevron direction
+                if (isExpanded)
+                {
+                    // Chevron up (collapse)
+                    ChevronIcon.Data = Geometry.Parse("M12,8L6,14L7.41,15.41L12,10.83L16.59,15.41L18,14L12,8Z");
+                }
+                else
+                {
+                    // Chevron down (expand)
+                    ChevronIcon.Data = Geometry.Parse("M16.59,8.59L12,13.17L7.41,8.59L6,10L12,16L18,10L16.59,8.59Z");
+                }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[UI] End session error: {ex.Message}");
+                Console.WriteLine($"[UI] Expand toggle error: {ex.Message}");
             }
+        }
+
+        private void Menu_Click(object sender, RoutedEventArgs e)
+        {
+            if (MenuBtn.ContextMenu != null)
+            {
+                MenuBtn.ContextMenu.PlacementTarget = MenuBtn;
+                MenuBtn.ContextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+                MenuBtn.ContextMenu.IsOpen = true;
+            }
+        }
+
+        private void OpacitySlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            this.Opacity = e.NewValue;
+        }
+
+        private void Quit_Click(object sender, RoutedEventArgs e)
+        {
+            Application.Current.Shutdown();
         }
 
         private void Close_Click(object sender, RoutedEventArgs e)
         {
             this.Visibility = Visibility.Collapsed;
+        }
+
+        private void Home_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                // Expand panel if collapsed
+                if (!isExpanded)
+                {
+                    isExpanded = true;
+                    ContentPanel.Visibility = Visibility.Visible;
+                    InputBar.Visibility = Visibility.Visible;
+                    ChevronIcon.Data = Geometry.Parse("M12,8L6,14L7.41,15.41L12,10.83L16.59,15.41L18,14L12,8Z");
+                }
+
+                // Switch to chat tab and show welcome
+                AlphaRegion.SwitchToChatTab();
+                TranscriptToggle.IsChecked = false;
+                AlphaRegion.SetMarkdownContent("**Welcome to SnapEye AI**\n\nSelect a mode above, then start listening or ask a question below.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] Home click error: {ex.Message}");
+            }
         }
 
         private void ModeSelector_Changed(object sender, SelectionChangedEventArgs e)
@@ -322,7 +427,6 @@ namespace SnapEye
 
         private void ChatInput_KeyDown(object sender, KeyEventArgs e)
         {
-            // Ctrl+Enter or just Enter to send
             if (e.Key == Key.Enter && (Keyboard.Modifiers == ModifierKeys.Control || Keyboard.Modifiers == ModifierKeys.None))
             {
                 Send_Click(sender, e);
@@ -338,6 +442,16 @@ namespace SnapEye
                 if (string.IsNullOrEmpty(query)) return;
 
                 ChatInput.Text = "";
+
+                // Ensure panel is expanded
+                if (!isExpanded)
+                {
+                    isExpanded = true;
+                    ContentPanel.Visibility = Visibility.Visible;
+                    InputBar.Visibility = Visibility.Visible;
+                    ChevronIcon.Data = Geometry.Parse("M12,8L6,14L7.41,15.41L12,10.83L16.59,15.41L18,14L12,8Z");
+                }
+
                 AlphaRegion.SwitchToChatTab();
                 TranscriptToggle.IsChecked = false;
                 AlphaRegion.BeginStreamingResponse(query);
@@ -356,6 +470,15 @@ namespace SnapEye
         {
             try
             {
+                // Ensure panel is expanded
+                if (!isExpanded)
+                {
+                    isExpanded = true;
+                    ContentPanel.Visibility = Visibility.Visible;
+                    InputBar.Visibility = Visibility.Visible;
+                    ChevronIcon.Data = Geometry.Parse("M12,8L6,14L7.41,15.41L12,10.83L16.59,15.41L18,14L12,8Z");
+                }
+
                 AlphaRegion.ShowLoading();
                 string? ocrText = await screenCaptureService.CaptureAndOcrAsync();
                 if (!string.IsNullOrEmpty(ocrText))
@@ -399,6 +522,15 @@ namespace SnapEye
                     UpdateListeningUI(true);
                     StartSessionTimer();
 
+                    // Ensure panel is expanded and show transcription
+                    if (!isExpanded)
+                    {
+                        isExpanded = true;
+                        ContentPanel.Visibility = Visibility.Visible;
+                        InputBar.Visibility = Visibility.Visible;
+                        ChevronIcon.Data = Geometry.Parse("M12,8L6,14L7.41,15.41L12,10.83L16.59,15.41L18,14L12,8Z");
+                    }
+
                     AlphaRegion.SwitchToTranscriptionTab();
                     TranscriptToggle.IsChecked = true;
                 }
@@ -436,19 +568,100 @@ namespace SnapEye
         {
             Dispatcher.Invoke(() =>
             {
+                // Find template elements via the visual tree
+                var listenBtnText = FindListenBtnText();
+                var liveDot = FindLiveDot();
+                var listenBorder = FindListenBtnBorder();
+
                 if (listening)
                 {
-                    MicIcon.Text = "\U0001F534";  // Red circle = recording
-                    NotListeningBadge.Visibility = Visibility.Collapsed;
-                    SessionTimerBorder.Visibility = Visibility.Visible;
+                    // Update listen button text and show live dot
+                    if (listenBtnText != null) listenBtnText.Text = "00:00";
+                    if (liveDot != null) liveDot.Visibility = Visibility.Visible;
+
+                    // Change button to listening style (slightly different blue with glow)
+                    if (listenBorder != null)
+                    {
+                        listenBorder.Background = new SolidColorBrush(Color.FromRgb(0x1A, 0x6F, 0xE8));
+                        if (listenBorder.Effect is System.Windows.Media.Effects.DropShadowEffect glow)
+                        {
+                            glow.BlurRadius = 12;
+                            glow.Opacity = 0.5;
+                        }
+                    }
+
+                    // Update eye icon to active
+                    EyeIcon.Fill = new SolidColorBrush(Color.FromRgb(0x22, 0xC5, 0x5E));
+
+                    // Start live dot pulse
+                    StartLiveDotPulse();
                 }
                 else
                 {
-                    MicIcon.Text = "\U0001F399";   // Microphone
-                    NotListeningBadge.Visibility = Visibility.Visible;
-                    SessionTimerBorder.Visibility = Visibility.Collapsed;
+                    // Reset listen button
+                    if (listenBtnText != null) listenBtnText.Text = "Start Listening";
+                    if (liveDot != null) liveDot.Visibility = Visibility.Collapsed;
+
+                    if (listenBorder != null)
+                    {
+                        listenBorder.Background = new SolidColorBrush(Color.FromRgb(0x2D, 0x7F, 0xF9));
+                        if (listenBorder.Effect is System.Windows.Media.Effects.DropShadowEffect glow)
+                        {
+                            glow.BlurRadius = 0;
+                            glow.Opacity = 0;
+                        }
+                    }
+
+                    // Reset eye icon
+                    EyeIcon.Fill = new SolidColorBrush(Color.FromRgb(0x9C, 0xA3, 0xAF));
+
+                    StopLiveDotPulse();
                 }
             });
+        }
+
+        private void StartLiveDotPulse()
+        {
+            liveDotPulseTimer?.Stop();
+            liveDotPulseTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(700) };
+            liveDotPulseTimer.Tick += (s, e) =>
+            {
+                var liveDot = FindLiveDot();
+                if (liveDot != null)
+                {
+                    liveDotVisible = !liveDotVisible;
+                    liveDot.Opacity = liveDotVisible ? 1.0 : 0.3;
+                }
+            };
+            liveDotPulseTimer.Start();
+        }
+
+        private void StopLiveDotPulse()
+        {
+            liveDotPulseTimer?.Stop();
+            liveDotPulseTimer = null;
+        }
+
+        // Helper to find named elements inside the MicToggleBtn's template
+        private TextBlock? FindListenBtnText()
+        {
+            return FindTemplateChild<TextBlock>(MicToggleBtn, "ListenBtnText");
+        }
+
+        private Ellipse? FindLiveDot()
+        {
+            return FindTemplateChild<Ellipse>(MicToggleBtn, "LiveDot");
+        }
+
+        private Border? FindListenBtnBorder()
+        {
+            return FindTemplateChild<Border>(MicToggleBtn, "ListenBtnBorder");
+        }
+
+        private static T? FindTemplateChild<T>(Control parent, string name) where T : FrameworkElement
+        {
+            if (parent.Template == null) return null;
+            return parent.Template.FindName(name, parent) as T;
         }
 
         #endregion
@@ -462,7 +675,9 @@ namespace SnapEye
             sessionTimer.Tick += (s, e) =>
             {
                 var elapsed = DateTime.Now - sessionStartTime;
-                SessionTimerText.Text = elapsed.ToString(@"mm\:ss");
+                var listenBtnText = FindListenBtnText();
+                if (listenBtnText != null)
+                    listenBtnText.Text = elapsed.ToString(@"mm\:ss");
             };
             sessionTimer.Start();
         }
@@ -471,7 +686,6 @@ namespace SnapEye
         {
             sessionTimer?.Stop();
             sessionTimer = null;
-            Dispatcher.Invoke(() => SessionTimerText.Text = "00:00");
         }
 
         #endregion
@@ -601,6 +815,7 @@ namespace SnapEye
             try
             {
                 sessionTimer?.Stop();
+                liveDotPulseTimer?.Stop();
                 audioCaptureService?.Dispose();
                 speakerCaptureService?.Dispose();
                 transcriptionService?.Dispose();

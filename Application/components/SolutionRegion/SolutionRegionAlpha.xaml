@@ -7,7 +7,7 @@
         <!-- Markdown text styles for dark theme -->
         <Style TargetType="Paragraph">
             <Setter Property="Foreground" Value="#E0E0E0"/>
-            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontSize" Value="12.5"/>
             <Setter Property="Margin" Value="0,0,0,6"/>
             <Setter Property="FontFamily" Value="Segoe UI, Arial"/>
         </Style>
@@ -18,22 +18,22 @@
             <Setter Property="Foreground" Value="#E0E0E0"/>
         </Style>
         <Style TargetType="Section">
-            <Setter Property="Background" Value="#20FFFFFF"/>
+            <Setter Property="Background" Value="#15FFFFFF"/>
             <Setter Property="Foreground" Value="#E0E0E0"/>
             <Setter Property="Padding" Value="8"/>
             <Setter Property="Margin" Value="0,0,0,6"/>
         </Style>
         <Style x:Key="CodeBlockStyle" TargetType="Section">
-            <Setter Property="Background" Value="#15FFFFFF"/>
+            <Setter Property="Background" Value="#10FFFFFF"/>
             <Setter Property="Foreground" Value="#E0E0E0"/>
-            <Setter Property="BorderBrush" Value="#6C5CE7"/>
+            <Setter Property="BorderBrush" Value="#2D7FF9"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="8"/>
             <Setter Property="Margin" Value="0,4,0,6"/>
         </Style>
         <Style x:Key="CodeStyle" TargetType="Inline">
-            <Setter Property="Background" Value="#20FFFFFF"/>
-            <Setter Property="Foreground" Value="#A29BFE"/>
+            <Setter Property="Background" Value="#15FFFFFF"/>
+            <Setter Property="Foreground" Value="#5B9CF9"/>
             <Setter Property="FontFamily" Value="Cascadia Code, Consolas, Courier New"/>
         </Style>
         
@@ -50,7 +50,7 @@
                                     <Thumb>
                                         <Thumb.Style>
                                             <Style TargetType="Thumb">
-                                                <Setter Property="Background" Value="#30FFFFFF"/>
+                                                <Setter Property="Background" Value="#25FFFFFF"/>
                                                 <Setter Property="Template">
                                                     <Setter.Value>
                                                         <ControlTemplate TargetType="Thumb">
@@ -60,7 +60,7 @@
                                                 </Setter>
                                                 <Style.Triggers>
                                                     <Trigger Property="IsMouseOver" Value="True">
-                                                        <Setter Property="Background" Value="#6C5CE7"/>
+                                                        <Setter Property="Background" Value="#2D7FF9"/>
                                                     </Trigger>
                                                 </Style.Triggers>
                                             </Style>
@@ -107,7 +107,8 @@
                 <!-- Placeholder -->
                 <TextBlock x:Name="TranscriptPlaceholder"
                            Text="Start listening to see live transcription..."
-                           Foreground="#666666" FontSize="11" FontStyle="Italic"
+                           Foreground="#6B7280" FontSize="11" FontStyle="Italic"
+                           FontFamily="Segoe UI"
                            Margin="4,8" HorizontalAlignment="Center"/>
             </StackPanel>
         </ScrollViewer>

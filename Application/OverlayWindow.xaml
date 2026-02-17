@@ -9,35 +9,45 @@
         Topmost="True"
         ResizeMode="NoResize"
         ShowInTaskbar="False"
-        Width="380"
+        Width="460"
         SizeToContent="Height"
         MouseDown="Window_MouseDown"
         Loaded="Window_Loaded"
         KeyDown="Window_KeyDown">
     
     <Window.Resources>
-        <!-- Accent Brush -->
-        <SolidColorBrush x:Key="AccentBrush" Color="#6C5CE7"/>
-        <SolidColorBrush x:Key="AccentLightBrush" Color="#A29BFE"/>
-        <SolidColorBrush x:Key="BgPrimaryBrush" Color="#1A1A2E"/>
-        <SolidColorBrush x:Key="BgSecondaryBrush" Color="#16213E"/>
-        <SolidColorBrush x:Key="BgCardBrush" Color="#0F3460"/>
-        <SolidColorBrush x:Key="TextPrimaryBrush" Color="#FFFFFF"/>
-        <SolidColorBrush x:Key="TextSecondaryBrush" Color="#B0B0B0"/>
-        <SolidColorBrush x:Key="TextMutedBrush" Color="#666666"/>
-        <SolidColorBrush x:Key="BorderBrush" Color="#2D2D4E"/>
-        <SolidColorBrush x:Key="SuccessBrush" Color="#00B894"/>
-        <SolidColorBrush x:Key="ErrorBrush" Color="#FF6B6B"/>
+        <!-- ==================== COLOR PALETTE ==================== -->
+        <Color x:Key="PrimaryBgColor">#2B2B2B</Color>
+        <Color x:Key="SecondaryBgColor">#333333</Color>
+        <Color x:Key="CardBgColor">#3A3A3A</Color>
+        <Color x:Key="BluePrimaryColor">#2D7FF9</Color>
+        <Color x:Key="BlueHoverColor">#1A6FE8</Color>
+        <Color x:Key="TextWhiteColor">#FFFFFF</Color>
+        <Color x:Key="TextSecondaryColor">#9CA3AF</Color>
+        <Color x:Key="TextMutedColor">#6B7280</Color>
+        <Color x:Key="BorderSubtleColor">#404040</Color>
+        <Color x:Key="RedLiveColor">#DC2626</Color>
         
-        <!-- Icon Button Style (Navbar) -->
-        <Style x:Key="IconBtnStyle" TargetType="Button">
+        <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource BluePrimaryColor}"/>
+        <SolidColorBrush x:Key="AccentLightBrush" Color="#5B9CF9"/>
+        <SolidColorBrush x:Key="PrimaryBgBrush" Color="{StaticResource PrimaryBgColor}"/>
+        <SolidColorBrush x:Key="SecondaryBgBrush" Color="{StaticResource SecondaryBgColor}"/>
+        <SolidColorBrush x:Key="CardBgBrush" Color="{StaticResource CardBgColor}"/>
+        <SolidColorBrush x:Key="TextBrush" Color="{StaticResource TextWhiteColor}"/>
+        <SolidColorBrush x:Key="TextSecondaryBrush" Color="{StaticResource TextSecondaryColor}"/>
+        <SolidColorBrush x:Key="TextMutedBrush" Color="{StaticResource TextMutedColor}"/>
+        <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource BorderSubtleColor}"/>
+        <SolidColorBrush x:Key="SuccessBrush" Color="#22C55E"/>
+        <SolidColorBrush x:Key="ErrorBrush" Color="#EF4444"/>
+
+        <!-- ==================== TOOLBAR ICON BUTTON ==================== -->
+        <Style x:Key="ToolbarIconBtn" TargetType="Button">
             <Setter Property="Background" Value="Transparent"/>
-            <Setter Property="Foreground" Value="#B0B0B0"/>
+            <Setter Property="Foreground" Value="#9CA3AF"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Width" Value="32"/>
             <Setter Property="Height" Value="32"/>
             <Setter Property="Cursor" Value="Hand"/>
-            <Setter Property="FontSize" Value="14"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
@@ -50,21 +60,49 @@
             </Setter>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#30FFFFFF"/>
+                    <Setter Property="Background" Value="#20FFFFFF"/>
                     <Setter Property="Foreground" Value="#FFFFFF"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
-        
-        <!-- Quick Action Pill Button -->
+
+        <!-- ==================== CLOSE BUTTON (CIRCULAR) ==================== -->
+        <Style x:Key="CloseButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="#404040"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Width" Value="26"/>
+            <Setter Property="Height" Value="26"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" 
+                                CornerRadius="13">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#555555"/>
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter Property="Background" Value="#666666"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- ==================== QUICK ACTION PILL ==================== -->
         <Style x:Key="QuickActionStyle" TargetType="Button">
-            <Setter Property="Background" Value="#20FFFFFF"/>
-            <Setter Property="Foreground" Value="#D0D0D0"/>
+            <Setter Property="Background" Value="#15FFFFFF"/>
+            <Setter Property="Foreground" Value="#9CA3AF"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="BorderBrush" Value="#30FFFFFF"/>
+            <Setter Property="BorderBrush" Value="#20FFFFFF"/>
             <Setter Property="Padding" Value="10,5"/>
             <Setter Property="Margin" Value="3,2"/>
             <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Template">
                 <Setter.Value>
@@ -81,20 +119,21 @@
             </Setter>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#6C5CE7"/>
+                    <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
                     <Setter Property="Foreground" Value="#FFFFFF"/>
-                    <Setter Property="BorderBrush" Value="#6C5CE7"/>
+                    <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
-        
-        <!-- Transcript Toggle Style -->
+
+        <!-- ==================== TOGGLE BUTTON ==================== -->
         <Style x:Key="ToggleBtnStyle" TargetType="ToggleButton">
-            <Setter Property="Background" Value="#20FFFFFF"/>
-            <Setter Property="Foreground" Value="#B0B0B0"/>
+            <Setter Property="Background" Value="#15FFFFFF"/>
+            <Setter Property="Foreground" Value="#9CA3AF"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Padding" Value="8,4"/>
             <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Template">
                 <Setter.Value>
@@ -109,27 +148,28 @@
             </Setter>
             <Style.Triggers>
                 <Trigger Property="IsChecked" Value="True">
-                    <Setter Property="Background" Value="#6C5CE7"/>
+                    <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
                     <Setter Property="Foreground" Value="#FFFFFF"/>
                 </Trigger>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#40FFFFFF"/>
+                    <Setter Property="Background" Value="#30FFFFFF"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
-        
-        <!-- ComboBox Dark Style -->
+
+        <!-- ==================== COMBOBOX ==================== -->
         <Style x:Key="DarkComboStyle" TargetType="ComboBox">
-            <Setter Property="Background" Value="#20FFFFFF"/>
+            <Setter Property="Background" Value="#15FFFFFF"/>
             <Setter Property="Foreground" Value="#FFFFFF"/>
-            <Setter Property="BorderBrush" Value="#30FFFFFF"/>
+            <Setter Property="BorderBrush" Value="#20FFFFFF"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
             <Setter Property="Padding" Value="8,5"/>
             <Setter Property="Cursor" Value="Hand"/>
         </Style>
-        
-        <!-- Scrollbar Style -->
+
+        <!-- ==================== THIN SCROLLBAR ==================== -->
         <Style x:Key="ThinScrollbar" TargetType="ScrollBar">
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="Width" Value="4"/>
@@ -142,7 +182,7 @@
                                     <Thumb>
                                         <Thumb.Style>
                                             <Style TargetType="Thumb">
-                                                <Setter Property="Background" Value="#40FFFFFF"/>
+                                                <Setter Property="Background" Value="#30FFFFFF"/>
                                                 <Setter Property="Template">
                                                     <Setter.Value>
                                                         <ControlTemplate TargetType="Thumb">
@@ -152,7 +192,7 @@
                                                 </Setter>
                                                 <Style.Triggers>
                                                     <Trigger Property="IsMouseOver" Value="True">
-                                                        <Setter Property="Background" Value="#6C5CE7"/>
+                                                        <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
                                                     </Trigger>
                                                 </Style.Triggers>
                                             </Style>
@@ -167,202 +207,330 @@
         </Style>
     </Window.Resources>
     
-    <!-- Main Widget Container -->
-    <Border CornerRadius="16" 
-            Margin="8"
-            ClipToBounds="True">
-        
-        <Border.Background>
-            <SolidColorBrush Color="#1A1A2E" Opacity="0.96"/>
-        </Border.Background>
-        <Border.BorderBrush>
-            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                <GradientStop Color="#40FFFFFF" Offset="0"/>
-                <GradientStop Color="#15FFFFFF" Offset="1"/>
-            </LinearGradientBrush>
-        </Border.BorderBrush>
-        <Border.BorderThickness>
-            <Thickness>1</Thickness>
-        </Border.BorderThickness>
-        <Border.Effect>
-            <DropShadowEffect Color="#000000" Direction="270" 
-                              ShadowDepth="4" BlurRadius="20" Opacity="0.5"/>
-        </Border.Effect>
+    <!-- ==================== MAIN LAYOUT ==================== -->
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>  <!-- Row 0: Floating Toolbar -->
+            <RowDefinition Height="Auto"/>  <!-- Row 1: Expandable Content Panel -->
+            <RowDefinition Height="Auto"/>  <!-- Row 2: Bottom Input Bar -->
+        </Grid.RowDefinitions>
 
-        <Grid>
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>   <!-- Row 0: Navbar -->
-                <RowDefinition Height="Auto"/>   <!-- Row 1: Mode bar + Transcript toggle -->
-                <RowDefinition Height="*" MinHeight="200" MaxHeight="420"/>  <!-- Row 2: Content -->
-                <RowDefinition Height="Auto"/>   <!-- Row 3: Quick actions -->
-                <RowDefinition Height="Auto"/>   <!-- Row 4: Chat input -->
-            </Grid.RowDefinitions>
+        <!-- ============================================================ -->
+        <!-- ROW 0: FLOATING TOOLBAR (TOP PILL)                           -->
+        <!-- ============================================================ -->
+        <Border Grid.Row="0" CornerRadius="22" Height="44" ClipToBounds="True">
+            <Border.Background>
+                <SolidColorBrush Color="#2B2B2B" Opacity="0.94"/>
+            </Border.Background>
+            <Border.Effect>
+                <DropShadowEffect Color="#000000" Direction="270" 
+                                  ShadowDepth="3" BlurRadius="16" Opacity="0.35"/>
+            </Border.Effect>
+            
+            <Grid Margin="6,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>  <!-- Stealth btn -->
+                    <ColumnDefinition Width="Auto"/>  <!-- Eye icon -->
+                    <ColumnDefinition Width="Auto"/>  <!-- Start Listening btn -->
+                    <ColumnDefinition Width="Auto"/>  <!-- Chevron -->
+                    <ColumnDefinition Width="*"/>     <!-- Spacer -->
+                    <ColumnDefinition Width="Auto"/>  <!-- Divider -->
+                    <ColumnDefinition Width="Auto"/>  <!-- Menu -->
+                    <ColumnDefinition Width="8"/>     <!-- Gap -->
+                    <ColumnDefinition Width="Auto"/>  <!-- Close -->
+                </Grid.ColumnDefinitions>
 
-            <!-- ============ ROW 0: NAVIGATION BAR ============ -->
-            <Border Grid.Row="0" Padding="12,10" 
-                    BorderBrush="{StaticResource BorderBrush}" 
-                    BorderThickness="0,0,0,1">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>  <!-- Drag handle -->
-                        <ColumnDefinition Width="Auto"/>  <!-- Logo -->
-                        <ColumnDefinition Width="*"/>     <!-- Spacer -->
-                        <ColumnDefinition Width="Auto"/>  <!-- Mic toggle -->
-                        <ColumnDefinition Width="Auto"/>  <!-- Session timer -->
-                        <ColumnDefinition Width="Auto"/>  <!-- Close -->
-                    </Grid.ColumnDefinitions>
+                <!-- Stealth / Incognito Button -->
+                <Button x:Name="StealthBtn" Grid.Column="0" 
+                        Style="{StaticResource ToolbarIconBtn}"
+                        Click="Stealth_Click"
+                        ToolTip="Make assistant invisible. This will also restart the app."
+                        ToolTipService.Placement="Top">
+                    <Viewbox Width="16" Height="16">
+                        <Canvas Width="24" Height="24">
+                            <Path x:Name="StealthIcon" Fill="#9CA3AF"
+                                  Data="M11.83,9L15,12.16C15,12.11 15,12.05 15,12A3,3 0 0,0 12,9C11.94,9 11.89,9 11.83,9M7.53,9.8L9.08,11.35C9.03,11.56 9,11.77 9,12A3,3 0 0,0 12,15C12.22,15 12.44,14.97 12.65,14.92L14.2,16.47C13.53,16.8 12.79,17 12,17A5,5 0 0,1 7,12C7,11.21 7.2,10.47 7.53,9.8M2,4.27L4.28,6.55L4.73,7C3.08,8.3 1.78,10 1,12C2.73,16.39 7,19.5 12,19.5C13.55,19.5 15.03,19.2 16.38,18.66L16.81,19.08L19.73,22L21,20.73L3.27,3M12,7A5,5 0 0,1 17,12C17,12.64 16.87,13.26 16.64,13.82L19.57,16.75C21.07,15.5 22.27,13.86 23,12C21.27,7.61 17,4.5 12,4.5C10.6,4.5 9.26,4.75 8,5.2L10.17,7.35C10.74,7.13 11.35,7 12,7Z"/>
+                        </Canvas>
+                    </Viewbox>
+                </Button>
 
-                    <!-- Drag Handle -->
-                    <TextBlock Grid.Column="0" Text="&#x2801;&#x2801;&#x2801;" 
-                               FontSize="16" Foreground="#555555" 
-                               VerticalAlignment="Center" 
-                               Cursor="SizeAll" Margin="0,0,8,0"
-                               ToolTip="Drag to reposition"/>
+                <!-- Eye / Visibility Status Icon -->
+                <Button x:Name="EyeStatusBtn" Grid.Column="1" 
+                        Style="{StaticResource ToolbarIconBtn}"
+                        Click="MicToggle_Click"
+                        ToolTip="Listening status">
+                    <Viewbox Width="16" Height="16">
+                        <Canvas Width="24" Height="24">
+                            <Path x:Name="EyeIcon" Fill="#9CA3AF"
+                                  Data="M12,4.5C7,4.5 2.73,7.61 1,12C2.73,16.39 7,19.5 12,19.5S21.27,16.39 23,12C21.27,7.61 17,4.5 12,4.5M12,17A5,5 0 0,1 7,12A5,5 0 0,1 12,7A5,5 0 0,1 17,12A5,5 0 0,1 12,17M12,9A3,3 0 0,0 9,12A3,3 0 0,0 12,15A3,3 0 0,0 15,12A3,3 0 0,0 12,9Z"/>
+                        </Canvas>
+                    </Viewbox>
+                </Button>
 
-                    <!-- Logo / App Name -->
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                        <Ellipse Width="8" Height="8" Fill="{StaticResource AccentBrush}" Margin="0,0,6,0"/>
-                        <TextBlock Text="SnapEye" FontSize="14" FontWeight="SemiBold" 
-                                   Foreground="#FFFFFF" VerticalAlignment="Center"/>
-                    </StackPanel>
-
-                    <!-- Microphone Toggle -->
-                    <Button x:Name="MicToggleBtn" Grid.Column="3" 
-                            Style="{StaticResource IconBtnStyle}"
-                            Click="MicToggle_Click" Margin="4,0"
-                            ToolTip="Toggle listening (Ctrl+Shift+L)">
-                        <TextBlock x:Name="MicIcon" Text="&#x1F399;" FontSize="16"/>
-                    </Button>
-
-                    <!-- Session Timer / End Button -->
-                    <Border x:Name="SessionTimerBorder" Grid.Column="4" 
-                            Background="{StaticResource AccentBrush}" 
-                            CornerRadius="8" Padding="10,4" Margin="4,0"
-                            Cursor="Hand" Visibility="Collapsed"
-                            MouseLeftButtonDown="EndSession_Click">
-                        <TextBlock x:Name="SessionTimerText" Text="00:00" 
-                                   FontSize="12" FontWeight="SemiBold" 
-                                   Foreground="#FFFFFF" VerticalAlignment="Center"/>
-                    </Border>
-
-                    <!-- Not Listening Indicator (shown when not recording) -->
-                    <Border x:Name="NotListeningBadge" Grid.Column="4" 
-                            Background="#30FFFFFF" CornerRadius="8" 
-                            Padding="8,4" Margin="4,0">
-                        <TextBlock Text="Not listening" FontSize="11" 
-                                   Foreground="#888888" VerticalAlignment="Center"/>
-                    </Border>
-
-                    <!-- Close Button -->
-                    <Button x:Name="CloseBtn" Grid.Column="5" 
-                            Style="{StaticResource IconBtnStyle}"
-                            Click="Close_Click" Margin="4,0,0,0"
-                            ToolTip="Hide widget">
-                        <TextBlock Text="&#x2715;" FontSize="12"/>
-                    </Button>
-                </Grid>
-            </Border>
-
-            <!-- ============ ROW 1: MODE SELECTOR + TRANSCRIPT TOGGLE ============ -->
-            <Border Grid.Row="1" Padding="12,8" 
-                    BorderBrush="{StaticResource BorderBrush}" 
-                    BorderThickness="0,0,0,1">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-
-                    <!-- Mode Selector -->
-                    <ComboBox x:Name="ModeSelector" Grid.Column="0" 
-                              Style="{StaticResource DarkComboStyle}"
-                              SelectionChanged="ModeSelector_Changed"/>
-
-                    <!-- Show Transcript Toggle -->
-                    <ToggleButton x:Name="TranscriptToggle" Grid.Column="1" 
-                                  Content="Transcript"
-                                  Style="{StaticResource ToggleBtnStyle}"
-                                  Checked="TranscriptToggle_Changed"
-                                  Unchecked="TranscriptToggle_Changed"
-                                  Margin="8,0,0,0"/>
-                </Grid>
-            </Border>
-
-            <!-- ============ ROW 2: MAIN CONTENT (AI Insights / Transcript) ============ -->
-            <solution:SolutionRegionAlpha x:Name="AlphaRegion" Grid.Row="2"/>
-
-            <!-- ============ ROW 3: QUICK ACTION BUTTONS ============ -->
-            <Border Grid.Row="3" Padding="8,6" 
-                    BorderBrush="{StaticResource BorderBrush}" 
-                    BorderThickness="0,1,0,0">
-                <WrapPanel x:Name="QuickActionsPanel" Orientation="Horizontal">
-                    <!-- Populated dynamically from config.yaml -->
-                </WrapPanel>
-            </Border>
-
-            <!-- ============ ROW 4: CHAT INPUT BAR ============ -->
-            <Border Grid.Row="4" Padding="10,8" 
-                    Background="#10FFFFFF">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-
-                    <!-- Text Input -->
-                    <TextBox x:Name="ChatInput" Grid.Column="0"
-                             Background="#15FFFFFF" Foreground="#FFFFFF"
-                             BorderBrush="#30FFFFFF" BorderThickness="1"
-                             FontSize="12" Padding="10,8"
-                             VerticalContentAlignment="Center"
-                             Text="" AcceptsReturn="False"
-                             KeyDown="ChatInput_KeyDown">
-                        <TextBox.Template>
-                            <ControlTemplate TargetType="TextBox">
-                                <Border Background="{TemplateBinding Background}"
-                                        BorderBrush="{TemplateBinding BorderBrush}"
-                                        BorderThickness="{TemplateBinding BorderThickness}"
-                                        CornerRadius="10">
-                                    <ScrollViewer x:Name="PART_ContentHost" 
-                                                  Padding="{TemplateBinding Padding}"
-                                                  VerticalAlignment="Center"/>
-                                </Border>
-                            </ControlTemplate>
-                        </TextBox.Template>
-                    </TextBox>
-
-                    <!-- Screenshot Button -->
-                    <Button x:Name="ScreenshotBtn" Grid.Column="1"
-                            Style="{StaticResource IconBtnStyle}"
-                            Click="Screenshot_Click" Margin="4,0"
-                            ToolTip="Capture screen (Ctrl+Shift+S)">
-                        <TextBlock Text="&#x1F4F7;" FontSize="14"/>
-                    </Button>
-
-                    <!-- Send Button -->
-                    <Button x:Name="SendBtn" Grid.Column="2"
-                            Width="34" Height="34"
-                            Cursor="Hand" Click="Send_Click"
-                            ToolTip="Send (Ctrl+Enter)">
-                        <Button.Template>
-                            <ControlTemplate TargetType="Button">
-                                <Border Background="{StaticResource AccentBrush}" CornerRadius="10">
-                                    <TextBlock Text="&#x27A4;" FontSize="14" 
-                                               Foreground="White"
-                                               HorizontalAlignment="Center" 
+                <!-- Primary: Start Listening / Listening Button -->
+                <Button x:Name="MicToggleBtn" Grid.Column="2" 
+                        Click="MicToggle_Click" Margin="4,0"
+                        Cursor="Hand"
+                        ToolTip="Toggle listening (Ctrl+Shift+L)">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="ListenBtnBorder" 
+                                    Background="#2D7FF9" 
+                                    CornerRadius="16" 
+                                    Padding="16,6"
+                                    MinWidth="120">
+                                <Border.Effect>
+                                    <DropShadowEffect x:Name="ListenGlow" Color="#2D7FF9" 
+                                                      BlurRadius="0" ShadowDepth="0" Opacity="0"/>
+                                </Border.Effect>
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                    <!-- Red dot indicator (visible when listening) -->
+                                    <Ellipse x:Name="LiveDot" Width="8" Height="8" 
+                                             Fill="#DC2626" Margin="0,0,6,0"
+                                             Visibility="Collapsed" VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="ListenBtnText" 
+                                               Text="Start Listening" 
+                                               FontSize="12" FontWeight="SemiBold"
+                                               FontFamily="Segoe UI"
+                                               Foreground="White" 
                                                VerticalAlignment="Center"/>
-                                </Border>
-                                <ControlTemplate.Triggers>
-                                    <Trigger Property="IsMouseOver" Value="True">
-                                        <Setter Property="Opacity" Value="0.85"/>
-                                    </Trigger>
-                                </ControlTemplate.Triggers>
-                            </ControlTemplate>
-                        </Button.Template>
-                    </Button>
-                </Grid>
-            </Border>
-        </Grid>
-    </Border>
+                                </StackPanel>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="ListenBtnBorder" Property="Background" Value="#1A6FE8"/>
+                                </Trigger>
+                                <Trigger Property="IsPressed" Value="True">
+                                    <Setter TargetName="ListenBtnBorder" Property="Background" Value="#1560D0"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Button.Template>
+                </Button>
+
+                <!-- Chevron: Expand / Collapse -->
+                <Button x:Name="ExpandToggleBtn" Grid.Column="3" 
+                        Style="{StaticResource ToolbarIconBtn}"
+                        Click="ExpandToggle_Click"
+                        ToolTip="Toggle panel" Width="28" Height="28">
+                    <Viewbox Width="14" Height="14">
+                        <Canvas Width="24" Height="24">
+                            <Path x:Name="ChevronIcon" Fill="#9CA3AF"
+                                  Data="M12,8L6,14L7.41,15.41L12,10.83L16.59,15.41L18,14L12,8Z"/>
+                        </Canvas>
+                    </Viewbox>
+                </Button>
+
+                <!-- Vertical Divider -->
+                <Border Grid.Column="5" Width="1" Height="20" 
+                        Background="#404040" VerticalAlignment="Center" Margin="4,0"/>
+
+                <!-- 3-Dot Menu -->
+                <Button x:Name="MenuBtn" Grid.Column="6" 
+                        Style="{StaticResource ToolbarIconBtn}"
+                        Click="Menu_Click" Width="28" Height="28">
+                    <Button.ContextMenu>
+                        <ContextMenu x:Name="SettingsMenu">
+                            <MenuItem Header="Screenshot" Click="Screenshot_Click" InputGestureText="Ctrl+Shift+S">
+                                <MenuItem.Icon>
+                                    <Viewbox Width="14" Height="14">
+                                        <Canvas Width="24" Height="24">
+                                            <Path Fill="#9CA3AF" Data="M4,4H7L9,2H15L17,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4M12,7A5,5 0 0,0 7,12A5,5 0 0,0 12,17A5,5 0 0,0 17,12A5,5 0 0,0 12,7M12,9A3,3 0 0,1 15,12A3,3 0 0,1 12,15A3,3 0 0,1 9,12A3,3 0 0,1 12,9Z"/>
+                                        </Canvas>
+                                    </Viewbox>
+                                </MenuItem.Icon>
+                            </MenuItem>
+                            <Separator/>
+                            <MenuItem Header="Opacity">
+                                <Slider x:Name="OpacitySlider" 
+                                        Minimum="0.3" Maximum="1.0" Value="0.95"
+                                        Width="120" 
+                                        ValueChanged="OpacitySlider_Changed"/>
+                            </MenuItem>
+                            <Separator/>
+                            <MenuItem Header="Quit SnapEye" Click="Quit_Click" InputGestureText="Alt+F4"/>
+                        </ContextMenu>
+                    </Button.ContextMenu>
+                    <Viewbox Width="14" Height="14">
+                        <Canvas Width="24" Height="24">
+                            <Path Fill="#9CA3AF"
+                                  Data="M12,16A2,2 0 0,1 14,18A2,2 0 0,1 12,20A2,2 0 0,1 10,18A2,2 0 0,1 12,16M12,10A2,2 0 0,1 14,12A2,2 0 0,1 12,14A2,2 0 0,1 10,12A2,2 0 0,1 12,10M12,4A2,2 0 0,1 14,6A2,2 0 0,1 12,8A2,2 0 0,1 10,6A2,2 0 0,1 12,4Z"/>
+                        </Canvas>
+                    </Viewbox>
+                </Button>
+
+                <!-- Close Button (circular, separated) -->
+                <Button x:Name="CloseBtn" Grid.Column="8" 
+                        Style="{StaticResource CloseButtonStyle}"
+                        Click="Close_Click"
+                        ToolTip="Hide widget" VerticalAlignment="Center">
+                    <Viewbox Width="10" Height="10">
+                        <Canvas Width="24" Height="24">
+                            <Path Fill="#FFFFFF"
+                                  Data="M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z"/>
+                        </Canvas>
+                    </Viewbox>
+                </Button>
+            </Grid>
+        </Border>
+
+        <!-- ============================================================ -->
+        <!-- ROW 1: EXPANDABLE CONTENT PANEL                              -->
+        <!-- ============================================================ -->
+        <Border x:Name="ContentPanel" Grid.Row="1" 
+                CornerRadius="16" Margin="0,6,0,0" 
+                ClipToBounds="True"
+                Visibility="Visible">
+            <Border.Background>
+                <SolidColorBrush Color="#2B2B2B" Opacity="0.94"/>
+            </Border.Background>
+            <Border.Effect>
+                <DropShadowEffect Color="#000000" Direction="270" 
+                                  ShadowDepth="3" BlurRadius="16" Opacity="0.30"/>
+            </Border.Effect>
+
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>   <!-- Mode bar + Transcript toggle -->
+                    <RowDefinition Height="*" MinHeight="180" MaxHeight="380"/>  <!-- Content -->
+                    <RowDefinition Height="Auto"/>   <!-- Quick actions -->
+                </Grid.RowDefinitions>
+
+                <!-- MODE SELECTOR + TRANSCRIPT TOGGLE -->
+                <Border Grid.Row="0" Padding="12,10" 
+                        BorderBrush="{StaticResource BorderBrush}" 
+                        BorderThickness="0,0,0,1">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <ComboBox x:Name="ModeSelector" Grid.Column="0" 
+                                  Style="{StaticResource DarkComboStyle}"
+                                  SelectionChanged="ModeSelector_Changed"/>
+
+                        <ToggleButton x:Name="TranscriptToggle" Grid.Column="1" 
+                                      Content="Transcript"
+                                      Style="{StaticResource ToggleBtnStyle}"
+                                      Checked="TranscriptToggle_Changed"
+                                      Unchecked="TranscriptToggle_Changed"
+                                      Margin="8,0,0,0"/>
+                    </Grid>
+                </Border>
+
+                <!-- MAIN CONTENT (AI Insights / Transcript) -->
+                <solution:SolutionRegionAlpha x:Name="AlphaRegion" Grid.Row="1"/>
+
+                <!-- QUICK ACTION BUTTONS -->
+                <Border Grid.Row="2" Padding="8,6" 
+                        BorderBrush="{StaticResource BorderBrush}" 
+                        BorderThickness="0,1,0,0">
+                    <WrapPanel x:Name="QuickActionsPanel" Orientation="Horizontal"/>
+                </Border>
+            </Grid>
+        </Border>
+
+        <!-- ============================================================ -->
+        <!-- ROW 2: BOTTOM INPUT BAR                                      -->
+        <!-- ============================================================ -->
+        <Border x:Name="InputBar" Grid.Row="2" 
+                CornerRadius="22" Height="48" Margin="0,6,0,0"
+                ClipToBounds="True">
+            <Border.Background>
+                <SolidColorBrush Color="#2B2B2B" Opacity="0.94"/>
+            </Border.Background>
+            <Border.Effect>
+                <DropShadowEffect Color="#000000" Direction="270" 
+                                  ShadowDepth="3" BlurRadius="16" Opacity="0.30"/>
+            </Border.Effect>
+
+            <Grid Margin="6,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>  <!-- Home icon -->
+                    <ColumnDefinition Width="*"/>     <!-- Text input -->
+                    <ColumnDefinition Width="Auto"/>  <!-- Send button -->
+                </Grid.ColumnDefinitions>
+
+                <!-- Home Button -->
+                <Button x:Name="HomeBtn" Grid.Column="0" 
+                        Style="{StaticResource ToolbarIconBtn}"
+                        Click="Home_Click"
+                        ToolTip="Home" Width="32" Height="32">
+                    <Viewbox Width="16" Height="16">
+                        <Canvas Width="24" Height="24">
+                            <Path Fill="#9CA3AF"
+                                  Data="M10,20V14H14V20H19V12H22L12,3L2,12H5V20H10Z"/>
+                        </Canvas>
+                    </Viewbox>
+                </Button>
+
+                <!-- Text Input -->
+                <TextBox x:Name="ChatInput" Grid.Column="1"
+                         Background="Transparent" 
+                         Foreground="#FFFFFF"
+                         BorderThickness="0"
+                         FontSize="13" FontFamily="Segoe UI"
+                         Padding="8,0"
+                         VerticalContentAlignment="Center"
+                         CaretBrush="#FFFFFF"
+                         Text="" AcceptsReturn="False"
+                         KeyDown="ChatInput_KeyDown">
+                    <TextBox.Template>
+                        <ControlTemplate TargetType="TextBox">
+                            <Grid>
+                                <!-- Placeholder text -->
+                                <TextBlock x:Name="PlaceholderText"
+                                           Text="Ask about your screen or conversation, or Ctrl+Enter for Assist"
+                                           Foreground="#6B7280"
+                                           FontSize="13" FontFamily="Segoe UI"
+                                           VerticalAlignment="Center"
+                                           Padding="8,0"
+                                           Visibility="Visible"
+                                           IsHitTestVisible="False"/>
+                                <ScrollViewer x:Name="PART_ContentHost" 
+                                              Padding="{TemplateBinding Padding}"
+                                              VerticalAlignment="Center"/>
+                            </Grid>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="Text" Value="">
+                                    <Setter TargetName="PlaceholderText" Property="Visibility" Value="Visible"/>
+                                </Trigger>
+                                <DataTrigger Binding="{Binding Text.Length, RelativeSource={RelativeSource Self}}" Value="0">
+                                    <Setter TargetName="PlaceholderText" Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </TextBox.Template>
+                </TextBox>
+
+                <!-- Send Button (circular blue) -->
+                <Button x:Name="SendBtn" Grid.Column="2"
+                        Width="34" Height="34"
+                        Cursor="Hand" Click="Send_Click"
+                        ToolTip="Send (Ctrl+Enter)" Margin="2,0,4,0">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="SendBorder" Background="#2D7FF9" CornerRadius="17">
+                                <Viewbox Width="14" Height="14">
+                                    <Canvas Width="24" Height="24">
+                                        <Path Fill="White"
+                                              Data="M2,21L23,12L2,3V10L17,12L2,14V21Z"/>
+                                    </Canvas>
+                                </Viewbox>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="SendBorder" Property="Background" Value="#1A6FE8"/>
+                                </Trigger>
+                                <Trigger Property="IsPressed" Value="True">
+                                    <Setter TargetName="SendBorder" Property="Background" Value="#1560D0"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Button.Template>
+                </Button>
+            </Grid>
+        </Border>
+    </Grid>
 </Window>

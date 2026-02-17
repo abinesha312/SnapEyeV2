@@ -23,10 +23,10 @@ namespace SnapEye.SolutionRegion
         private bool newSystemSegment = true;
         private bool hasPlaceholder = true;
 
-        // Theme colors (from config or defaults)
-        private static readonly Color AccentColor = (Color)ColorConverter.ConvertFromString("#6C5CE7");
-        private static readonly Color UserBubbleColor = (Color)ColorConverter.ConvertFromString("#6C5CE7");
-        private static readonly Color SystemBubbleColor = (Color)ColorConverter.ConvertFromString("#2D2D4E");
+        // Theme colors (blue accent, neutral grays)
+        private static readonly Color AccentColor = (Color)ColorConverter.ConvertFromString("#2D7FF9");
+        private static readonly Color UserBubbleColor = (Color)ColorConverter.ConvertFromString("#2D7FF9");
+        private static readonly Color SystemBubbleColor = (Color)ColorConverter.ConvertFromString("#3A3A3A");
         private static readonly Color TextColor = (Color)ColorConverter.ConvertFromString("#E0E0E0");
 
         public SolutionRegionAlpha()
@@ -284,12 +284,12 @@ namespace SnapEye.SolutionRegion
 
             Color bubbleColor = highlight
                 ? (isUser ? UserBubbleColor : SystemBubbleColor)
-                : (Color)ColorConverter.ConvertFromString("#15FFFFFF");
+                : (Color)ColorConverter.ConvertFromString("#12FFFFFF");
 
             var border = new Border
             {
                 Background = new SolidColorBrush(bubbleColor) { Opacity = highlight ? 0.6 : 1.0 },
-                BorderBrush = new SolidColorBrush(isUser ? UserBubbleColor : SystemBubbleColor) { Opacity = 0.5 },
+                BorderBrush = new SolidColorBrush(isUser ? UserBubbleColor : SystemBubbleColor) { Opacity = 0.4 },
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(10),
                 Padding = new Thickness(10, 6, 10, 6)
@@ -299,23 +299,22 @@ namespace SnapEye.SolutionRegion
             {
                 Text = text,
                 Foreground = new SolidColorBrush(TextColor),
-                FontSize = 11,
+                FontSize = 11.5,
                 TextWrapping = TextWrapping.Wrap,
                 FontFamily = new FontFamily("Segoe UI"),
             };
 
             border.Child = textBlock;
 
-            // User = right column, System = left column
             Grid.SetColumn(border, isUser ? 1 : 0);
             container.Children.Add(border);
 
-            // Source label
             var label = new TextBlock
             {
                 Text = isUser ? "You" : "Other",
                 FontSize = 9,
-                Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#555555")),
+                Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#6B7280")),
+                FontFamily = new FontFamily("Segoe UI"),
                 Margin = new Thickness(isUser ? 0 : 4, 0, isUser ? 4 : 0, 0),
                 HorizontalAlignment = isUser ? HorizontalAlignment.Right : HorizontalAlignment.Left,
                 VerticalAlignment = VerticalAlignment.Bottom,
@@ -331,7 +330,7 @@ namespace SnapEye.SolutionRegion
             var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             timer.Tick += (s, e) =>
             {
-                border.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#15FFFFFF"));
+                border.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#12FFFFFF"));
                 timer.Stop();
             };
             timer.Start();
@@ -343,7 +342,7 @@ namespace SnapEye.SolutionRegion
 
         public void UpdateOpacity(double value)
         {
-            // Not used in new design (opacity controlled at window level)
+            // Opacity controlled at window level
         }
 
         #endregion
