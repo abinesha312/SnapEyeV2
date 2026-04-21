@@ -4,6 +4,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
+using Markdig.Wpf;
+using SnapEye.Models;
 
 namespace SnapEye.SolutionRegion
 {
@@ -13,25 +15,71 @@ namespace SnapEye.SolutionRegion
         private readonly StringBuilder streamingBuffer = new();
         private bool isStreamingResponse;
         private DispatcherTimer? typingTimer;
+        private MarkdownViewer? currentStreamingViewer;
+        private Border? currentStreamingCard;
+        private string lastFinalAnswer = "";
 
         // Transcription state
         private Border? lastUserBubble;
         private TextBlock? lastUserText;
         private Border? lastSystemBubble;
         private TextBlock? lastSystemText;
-        private bool newUserSegment = true;
-        private bool newSystemSegment = true;
+        private MessageSource? lastBubbleSource;
+        private DateTime lastUserActivity;
+        private DateTime lastSystemActivity;
         private bool hasPlaceholder = true;
+        private bool chatHasPlaceholder = true;
+        private double bubbleMaxWidth = 360;
+        private double chatBubbleMaxWidth = 420;
 
-        // Theme colors (blue accent, neutral grays)
-        private static readonly Color AccentColor = (Color)ColorConverter.ConvertFromString("#2D7FF9");
-        private static readonly Color UserBubbleColor = (Color)ColorConverter.ConvertFromString("#2D7FF9");
-        private static readonly Color SystemBubbleColor = (Color)ColorConverter.ConvertFromString("#3A3A3A");
-        private static readonly Color TextColor = (Color)ColorConverter.ConvertFromString("#E0E0E0");
+        // Chat sticky-bottom
+        private bool chatStickyBottom = true;
+
+        // Force-new-bubble after this much silence on the same source.
+        private const double GapSecondsForNewBubble = 5.0;
+
+        // Theme colors (You = blue, Other = gray, AI = green for transcript / dark card for chat)
+        private static readonly Color UserBubbleColor   = (Color)ColorConverter.ConvertFromString("#2563EB");
+        private static readonly Color UserBorderColor   = (Color)ColorConverter.ConvertFromString("#1D4ED8");
+        private static readonly Color SystemBubbleColor = (Color)ColorConverter.ConvertFromString("#4B5563");
+        private static readonly Color SystemBorderColor = (Color)ColorConverter.ConvertFromString("#374151");
+        private static readonly Color AIBubbleColor     = (Color)ColorConverter.ConvertFromString("#16A34A");
+        private static readonly Color AIBorderColor     = (Color)ColorConverter.ConvertFromString("#15803D");
+        private static readonly Color BubbleTextColor   = (Color)ColorConverter.ConvertFromString("#F8FAFC");
+
+        // Chat answer card (dark subtle background, not green — reserved for richer markdown)
+        private static readonly Color AnswerCardFill   = (Color)ColorConverter.ConvertFromString("#1F2937");
+        private static readonly Color AnswerCardBorder = (Color)ColorConverter.ConvertFromString("#334155");
+        private static readonly Color AnswerAccent     = (Color)ColorConverter.ConvertFromString("#60A5FA");
 
         public SolutionRegionAlpha()
         {
             InitializeComponent();
+            Loaded += (_, __) =>
+            {
+                if (TranscriptionView != null)
+                {
+                    UpdateBubbleMaxWidth(TranscriptionView.ActualWidth);
+                    TranscriptionView.SizeChanged += (_, e) => UpdateBubbleMaxWidth(e.NewSize.Width);
+                }
+                if (ChatView != null)
+                {
+                    UpdateChatBubbleMaxWidth(ChatView.ActualWidth);
+                    ChatView.SizeChanged += (_, e) => UpdateChatBubbleMaxWidth(e.NewSize.Width);
+                    ChatView.ScrollChanged += ChatView_ScrollChanged;
+                }
+            };
+        }
+
+        private void UpdateBubbleMaxWidth(double viewWidth)
+        {
+            bubbleMaxWidth = Math.Max(180, (viewWidth * 0.75) - 40);
+        }
+
+        private void UpdateChatBubbleMaxWidth(double viewWidth)
+        {
+            // Answer cards take most of the width; user prompt bubbles ~80%.
+            chatBubbleMaxWidth = Math.Max(200, (viewWidth * 0.82) - 20);
         }
 
         #region Tab Switching
@@ -40,7 +88,7 @@ namespace SnapEye.SolutionRegion
         {
             SafeInvoke(() =>
             {
-                ChatView.Visibility = Visibility.Visible;
+                ChatViewRoot.Visibility = Visibility.Visible;
                 TranscriptionView.Visibility = Visibility.Collapsed;
             });
         }
@@ -49,55 +97,107 @@ namespace SnapEye.SolutionRegion
         {
             SafeInvoke(() =>
             {
-                ChatView.Visibility = Visibility.Collapsed;
+                ChatViewRoot.Visibility = Visibility.Collapsed;
                 TranscriptionView.Visibility = Visibility.Visible;
             });
         }
 
         #endregion
 
-        #region Chat / AI Content
+        #region Chat / AI Content (Q&A thread)
 
+        private void RemoveChatPlaceholder()
+        {
+            if (chatHasPlaceholder && ChatPlaceholder != null)
+            {
+                ChatPlaceholder.Visibility = Visibility.Collapsed;
+                chatHasPlaceholder = false;
+            }
+        }
+
+        /// <summary>Adds a plain info card to the chat history (used for one-off system messages / screen captures / errors).</summary>
         public void SetMarkdownContent(string markdown)
         {
             SafeInvoke(() =>
             {
-                if (MarkdownViewer != null)
-                    MarkdownViewer.Markdown = markdown ?? "";
+                if (string.IsNullOrWhiteSpace(markdown)) return;
+                RemoveChatPlaceholder();
+                var card = BuildAnswerCard(markdown);
+                ChatHistoryPanel.Children.Add(card);
+                MaybeAutoScroll();
             });
         }
 
-        public void AppendMarkdownContent(string markdown)
-        {
-            SafeInvoke(() =>
-            {
-                if (MarkdownViewer != null)
-                    MarkdownViewer.Markdown += "\n\n" + markdown;
-            });
-        }
+        public void AppendMarkdownContent(string markdown) => SetMarkdownContent(markdown);
 
         public void ClearContent()
         {
             SafeInvoke(() =>
             {
-                if (MarkdownViewer != null)
-                    MarkdownViewer.Markdown = "";
+                ChatHistoryPanel.Children.Clear();
+                chatHasPlaceholder = false;
+                isStreamingResponse = false;
+                HideTypingIndicator();
+                streamingBuffer.Clear();
+                currentStreamingViewer = null;
+                currentStreamingCard = null;
+                lastFinalAnswer = "";
+
+                // Re-add placeholder
+                if (ChatPlaceholder != null)
+                {
+                    ChatHistoryPanel.Children.Add(ChatPlaceholder);
+                    ChatPlaceholder.Visibility = Visibility.Visible;
+                    chatHasPlaceholder = true;
+                }
+                HideJumpToLatest();
+                chatStickyBottom = true;
             });
         }
 
-        public void ShowAIResponse(string response)
-        {
-            SafeInvoke(() => SetMarkdownContent($"## AI Response\n\n{response}"));
-        }
+        public void ShowAIResponse(string response) => SetMarkdownContent(response);
 
         public void ShowLoading()
         {
-            SafeInvoke(() => SetMarkdownContent("**Processing...**\n\nPlease wait while the AI generates a response."));
+            SafeInvoke(() =>
+            {
+                RemoveChatPlaceholder();
+                var card = BuildAnswerCard("**Processing...**\n\nPlease wait while the AI generates a response.");
+                ChatHistoryPanel.Children.Add(card);
+                MaybeAutoScroll();
+            });
         }
 
         public void ShowError(string error)
         {
-            SafeInvoke(() => SetMarkdownContent($"**Error**\n\n{error}"));
+            SafeInvoke(() =>
+            {
+                RemoveChatPlaceholder();
+                var card = BuildErrorCard(error);
+                ChatHistoryPanel.Children.Add(card);
+                MaybeAutoScroll();
+            });
+        }
+
+        /// <summary>Plain markdown of the most recent finalized AI answer (for copy/export).</summary>
+        public string GetChatMarkdown()
+        {
+            return Dispatcher.CheckAccess()
+                ? lastFinalAnswer
+                : Dispatcher.Invoke(() => lastFinalAnswer);
+        }
+
+        /// <summary>Adds a "You" prompt bubble to the chat thread (typed input or quick-action label).</summary>
+        public void AddUserPromptBubble(string text)
+        {
+            SafeInvoke(() =>
+            {
+                if (string.IsNullOrWhiteSpace(text)) return;
+                RemoveChatPlaceholder();
+                var row = BuildUserPromptRow(text.Trim());
+                ChatHistoryPanel.Children.Add(row);
+                MaybeAutoScroll();
+            });
         }
 
         #endregion
@@ -111,15 +211,17 @@ namespace SnapEye.SolutionRegion
                 SwitchToChatTab();
                 isStreamingResponse = true;
                 streamingBuffer.Clear();
+                RemoveChatPlaceholder();
 
-                string header = "## AI Suggestion";
-                if (!string.IsNullOrEmpty(question))
-                    header += $"\n> {question}";
-                header += "\n\n";
+                if (!string.IsNullOrWhiteSpace(question))
+                    ChatHistoryPanel.Children.Add(BuildUserPromptRow(question.Trim()));
 
-                streamingBuffer.Append(header);
-                SetMarkdownContent(streamingBuffer.ToString() + "...");
+                currentStreamingCard = BuildAnswerCard("...");
+                currentStreamingViewer = FindMarkdownViewer(currentStreamingCard);
+                ChatHistoryPanel.Children.Add(currentStreamingCard);
+
                 ShowTypingIndicator();
+                MaybeAutoScroll();
             });
         }
 
@@ -129,7 +231,9 @@ namespace SnapEye.SolutionRegion
             {
                 if (!isStreamingResponse) return;
                 streamingBuffer.Append(token);
-                SetMarkdownContent(streamingBuffer.ToString());
+                if (currentStreamingViewer != null)
+                    currentStreamingViewer.Markdown = streamingBuffer.ToString();
+                MaybeAutoScroll();
             });
         }
 
@@ -140,20 +244,22 @@ namespace SnapEye.SolutionRegion
                 isStreamingResponse = false;
                 HideTypingIndicator();
 
-                if (!string.IsNullOrEmpty(fullResponse))
-                {
-                    string header = streamingBuffer.ToString();
-                    int idx = header.IndexOf("\n\n");
-                    if (idx > 0)
-                        SetMarkdownContent(header.Substring(0, idx + 2) + fullResponse);
-                    else
-                        SetMarkdownContent("## AI Suggestion\n\n" + fullResponse);
-                }
-                else
-                {
-                    SetMarkdownContent(streamingBuffer.ToString());
-                }
+                string finalText = !string.IsNullOrEmpty(fullResponse)
+                    ? fullResponse!
+                    : streamingBuffer.ToString();
+
+                if (currentStreamingViewer != null)
+                    currentStreamingViewer.Markdown = finalText;
+
+                lastFinalAnswer = finalText;
                 streamingBuffer.Clear();
+                currentStreamingCard = null;
+                currentStreamingViewer = null;
+
+                if (!string.IsNullOrWhiteSpace(finalText))
+                    AddAIAnswer(finalText);
+
+                MaybeAutoScroll();
             });
         }
 
@@ -163,8 +269,12 @@ namespace SnapEye.SolutionRegion
             {
                 isStreamingResponse = false;
                 HideTypingIndicator();
-                SetMarkdownContent($"## AI Suggestion\n\n**Error:** {error}");
+                if (currentStreamingViewer != null)
+                    currentStreamingViewer.Markdown = $"**Error:** {error}";
                 streamingBuffer.Clear();
+                currentStreamingCard = null;
+                currentStreamingViewer = null;
+                MaybeAutoScroll();
             });
         }
 
@@ -175,9 +285,9 @@ namespace SnapEye.SolutionRegion
             int dots = 0;
             typingTimer.Tick += (s, e) =>
             {
-                if (!isStreamingResponse) { typingTimer.Stop(); return; }
+                if (!isStreamingResponse || currentStreamingViewer == null) { typingTimer?.Stop(); return; }
                 dots = (dots + 1) % 4;
-                SetMarkdownContent(streamingBuffer.ToString() + new string('.', dots));
+                currentStreamingViewer.Markdown = streamingBuffer.ToString() + new string('.', dots);
             };
             typingTimer.Start();
         }
@@ -186,6 +296,164 @@ namespace SnapEye.SolutionRegion
         {
             typingTimer?.Stop();
             typingTimer = null;
+        }
+
+        #endregion
+
+        #region Chat Card Builders
+
+        private Border BuildAnswerCard(string markdown)
+        {
+            var viewer = new MarkdownViewer
+            {
+                Background = Brushes.Transparent,
+                Foreground = new SolidColorBrush(BubbleTextColor),
+                Markdown = markdown ?? ""
+            };
+
+            var accent = new Border
+            {
+                Width = 3,
+                Background = new SolidColorBrush(AnswerAccent),
+                CornerRadius = new CornerRadius(2),
+                Margin = new Thickness(0, 2, 10, 2)
+            };
+
+            var grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            Grid.SetColumn(accent, 0);
+            Grid.SetColumn(viewer, 1);
+            grid.Children.Add(accent);
+            grid.Children.Add(viewer);
+
+            var card = new Border
+            {
+                Background = new SolidColorBrush(AnswerCardFill),
+                BorderBrush = new SolidColorBrush(AnswerCardBorder),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(12, 10, 12, 10),
+                Margin = new Thickness(0, 4, 28, 8),
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                Child = grid
+            };
+            return card;
+        }
+
+        private Border BuildErrorCard(string error)
+        {
+            return new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(0x33, 0xDC, 0x26, 0x26)),
+                BorderBrush = new SolidColorBrush(Color.FromRgb(0xDC, 0x26, 0x26)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(12, 10, 12, 10),
+                Margin = new Thickness(0, 4, 28, 8),
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                Child = new TextBlock
+                {
+                    Text = "⚠ " + error,
+                    Foreground = new SolidColorBrush(Color.FromRgb(0xFE, 0xCA, 0xCA)),
+                    FontSize = 13,
+                    TextWrapping = TextWrapping.Wrap,
+                    FontFamily = new FontFamily("Segoe UI")
+                }
+            };
+        }
+
+        private Grid BuildUserPromptRow(string text)
+        {
+            var bubble = new Border
+            {
+                Background = new SolidColorBrush(UserBubbleColor),
+                BorderBrush = new SolidColorBrush(UserBorderColor),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(14),
+                Padding = new Thickness(12, 8, 12, 8),
+                MaxWidth = chatBubbleMaxWidth,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Child = new TextBlock
+                {
+                    Text = text,
+                    Foreground = new SolidColorBrush(BubbleTextColor),
+                    FontSize = 13,
+                    LineHeight = 18,
+                    TextWrapping = TextWrapping.Wrap,
+                    FontFamily = new FontFamily("Segoe UI")
+                }
+            };
+
+            var row = new Grid { Margin = new Thickness(28, 6, 0, 4) };
+            row.Children.Add(bubble);
+            return row;
+        }
+
+        private static MarkdownViewer? FindMarkdownViewer(DependencyObject root)
+        {
+            if (root is MarkdownViewer mv) return mv;
+            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            {
+                var found = FindMarkdownViewer(VisualTreeHelper.GetChild(root, i));
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        #endregion
+
+        #region Sticky-bottom Auto-Scroll
+
+        private void ChatView_ScrollChanged(object sender, ScrollChangedEventArgs e)
+        {
+            if (ChatView == null) return;
+            double distanceFromBottom = ChatView.ScrollableHeight - ChatView.VerticalOffset;
+            bool atBottom = distanceFromBottom < 24; // tolerance in px
+
+            // User-initiated scroll changes vertical offset without extent change.
+            if (Math.Abs(e.VerticalChange) > 0.5 && Math.Abs(e.ExtentHeightChange) < 0.5)
+            {
+                chatStickyBottom = atBottom;
+                if (atBottom) HideJumpToLatest();
+            }
+
+            // New content arrived and user is not at bottom → show jump button.
+            if (e.ExtentHeightChange > 0.5 && !chatStickyBottom)
+                ShowJumpToLatest();
+            else if (atBottom)
+                HideJumpToLatest();
+        }
+
+        private void MaybeAutoScroll()
+        {
+            if (ChatView == null) return;
+            if (chatStickyBottom)
+            {
+                ChatView.Dispatcher.BeginInvoke(new Action(() => ChatView.ScrollToEnd()), DispatcherPriority.Background);
+                HideJumpToLatest();
+            }
+            else
+            {
+                ShowJumpToLatest();
+            }
+        }
+
+        private void JumpToLatest_Click(object sender, RoutedEventArgs e)
+        {
+            chatStickyBottom = true;
+            ChatView?.ScrollToEnd();
+            HideJumpToLatest();
+        }
+
+        private void ShowJumpToLatest()
+        {
+            if (JumpToLatestBtn != null) JumpToLatestBtn.Visibility = Visibility.Visible;
+        }
+
+        private void HideJumpToLatest()
+        {
+            if (JumpToLatestBtn != null) JumpToLatestBtn.Visibility = Visibility.Collapsed;
         }
 
         #endregion
@@ -203,60 +471,37 @@ namespace SnapEye.SolutionRegion
 
         public void AddUserTranscription(string text, bool isNewSegment = false)
         {
-            SafeInvoke(() =>
-            {
-                if (TranscriptionPanel == null || string.IsNullOrWhiteSpace(text)) return;
-                RemovePlaceholder();
-
-                if (isNewSegment || newUserSegment || lastUserBubble == null)
-                {
-                    var (container, border, textBlock) = CreateBubble(text, isUser: true, highlight: isNewSegment);
-                    TranscriptionPanel.Children.Add(container);
-                    lastUserBubble = border;
-                    lastUserText = textBlock;
-                    newUserSegment = false;
-
-                    if (isNewSegment)
-                        FadeHighlight(border, isUser: true);
-                }
-                else if (lastUserText != null)
-                {
-                    lastUserText.Text += " " + text;
-                }
-                TranscriptionView?.ScrollToEnd();
-            });
+            AddTranscriptBubble(text, MessageSource.Microphone, isNewSegment);
         }
 
         public void AddSystemTranscription(string text, bool isNewSegment = false)
+        {
+            AddTranscriptBubble(text, MessageSource.Speaker, isNewSegment);
+        }
+
+        public void AddAIAnswer(string text)
         {
             SafeInvoke(() =>
             {
                 if (TranscriptionPanel == null || string.IsNullOrWhiteSpace(text)) return;
                 RemovePlaceholder();
 
-                if (isNewSegment || newSystemSegment || lastSystemBubble == null)
-                {
-                    var (container, border, textBlock) = CreateBubble(text, isUser: false, highlight: isNewSegment);
-                    TranscriptionPanel.Children.Add(container);
-                    lastSystemBubble = border;
-                    lastSystemText = textBlock;
-                    newSystemSegment = false;
+                var (row, _, _) = CreateChatRow(text.Trim(), source: null);
+                TranscriptionPanel.Children.Add(row);
 
-                    if (isNewSegment)
-                        FadeHighlight(border, isUser: false);
-                }
-                else if (lastSystemText != null)
-                {
-                    lastSystemText.Text += " " + text;
-                }
+                lastBubbleSource = null;
+                lastUserBubble = lastSystemBubble = null;
+                lastUserText = lastSystemText = null;
+
                 TranscriptionView?.ScrollToEnd();
             });
         }
 
         public void MarkNextAsNewSegment()
         {
-            newUserSegment = true;
-            newSystemSegment = true;
+            lastBubbleSource = null;
+            lastUserActivity = default;
+            lastSystemActivity = default;
         }
 
         public void ClearTranscription()
@@ -267,73 +512,140 @@ namespace SnapEye.SolutionRegion
                 TranscriptionPanel.Children.Clear();
                 lastUserBubble = null; lastUserText = null;
                 lastSystemBubble = null; lastSystemText = null;
-                newUserSegment = true;
-                newSystemSegment = true;
+                lastBubbleSource = null;
+                lastUserActivity = default;
+                lastSystemActivity = default;
 
                 if (TranscriptPlaceholder != null)
+                {
+                    TranscriptionPanel.Children.Add(TranscriptPlaceholder);
                     TranscriptPlaceholder.Visibility = Visibility.Visible;
+                }
                 hasPlaceholder = true;
             });
         }
 
-        private (Grid container, Border border, TextBlock textBlock) CreateBubble(string text, bool isUser, bool highlight)
+        /// <summary>Clears both the chat thread and the transcription (used on End Session / new meeting).</summary>
+        public void ClearAll()
         {
-            var container = new Grid { Margin = new Thickness(0, 3, 0, 3) };
-            container.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            container.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2.5, GridUnitType.Star) });
+            ClearContent();
+            ClearTranscription();
+        }
 
-            Color bubbleColor = highlight
-                ? (isUser ? UserBubbleColor : SystemBubbleColor)
-                : (Color)ColorConverter.ConvertFromString("#12FFFFFF");
-
-            var border = new Border
+        private void AddTranscriptBubble(string text, MessageSource source, bool isNewSegment)
+        {
+            SafeInvoke(() =>
             {
-                Background = new SolidColorBrush(bubbleColor) { Opacity = highlight ? 0.6 : 1.0 },
-                BorderBrush = new SolidColorBrush(isUser ? UserBubbleColor : SystemBubbleColor) { Opacity = 0.4 },
+                if (TranscriptionPanel == null || string.IsNullOrWhiteSpace(text)) return;
+                RemovePlaceholder();
+
+                bool isUser = source == MessageSource.Microphone;
+                DateTime now = DateTime.Now;
+                DateTime lastActivity = isUser ? lastUserActivity : lastSystemActivity;
+                Border? lastBubble = isUser ? lastUserBubble : lastSystemBubble;
+                TextBlock? lastText = isUser ? lastUserText : lastSystemText;
+
+                bool flipped = lastBubbleSource.HasValue && lastBubbleSource.Value != source;
+                bool gapped = lastActivity != default
+                              && (now - lastActivity).TotalSeconds > GapSecondsForNewBubble;
+                bool startNew = isNewSegment || flipped || gapped || lastBubble == null;
+
+                if (startNew)
+                {
+                    var (row, border, textBlock) = CreateChatRow(text.Trim(), source);
+                    TranscriptionPanel.Children.Add(row);
+                    if (isUser) { lastUserBubble = border; lastUserText = textBlock; }
+                    else        { lastSystemBubble = border; lastSystemText = textBlock; }
+                }
+                else if (lastText != null)
+                {
+                    lastText.Text = (lastText.Text + " " + text).Trim();
+                }
+
+                if (isUser) lastUserActivity = now; else lastSystemActivity = now;
+                lastBubbleSource = source;
+                TranscriptionView?.ScrollToEnd();
+            });
+        }
+
+        private (Grid row, Border bubble, TextBlock textBlock) CreateChatRow(string text, MessageSource? source)
+        {
+            bool isAI   = !source.HasValue;
+            bool isUser = source == MessageSource.Microphone;
+
+            Color fill, edge;
+            string letter;
+            HorizontalAlignment align;
+
+            if (isAI)        { fill = AIBubbleColor;     edge = AIBorderColor;     letter = "A"; align = HorizontalAlignment.Left;  }
+            else if (isUser) { fill = UserBubbleColor;   edge = UserBorderColor;   letter = "Y"; align = HorizontalAlignment.Right; }
+            else             { fill = SystemBubbleColor; edge = SystemBorderColor; letter = "O"; align = HorizontalAlignment.Left;  }
+
+            var row = new Grid { Margin = new Thickness(0, 4, 0, 4) };
+
+            var stack = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = align,
+            };
+
+            var avatar = new Border
+            {
+                Width = 26,
+                Height = 26,
+                CornerRadius = new CornerRadius(13),
+                Background = new SolidColorBrush(fill),
+                BorderBrush = new SolidColorBrush(edge),
                 BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(10),
-                Padding = new Thickness(10, 6, 10, 6)
+                VerticalAlignment = VerticalAlignment.Bottom,
+                Margin = isUser ? new Thickness(8, 0, 0, 0) : new Thickness(0, 0, 8, 0),
+                Child = new TextBlock
+                {
+                    Text = letter,
+                    Foreground = new SolidColorBrush(Colors.White),
+                    FontWeight = FontWeights.Bold,
+                    FontSize = 11,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    FontFamily = new FontFamily("Segoe UI"),
+                },
+            };
+
+            var bubble = new Border
+            {
+                Background = new SolidColorBrush(fill),
+                BorderBrush = new SolidColorBrush(edge),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(12, 8, 12, 8),
+                MaxWidth = bubbleMaxWidth,
             };
 
             var textBlock = new TextBlock
             {
                 Text = text,
-                Foreground = new SolidColorBrush(TextColor),
-                FontSize = 11.5,
+                Foreground = new SolidColorBrush(BubbleTextColor),
+                FontSize = 13,
+                LineHeight = 18,
                 TextWrapping = TextWrapping.Wrap,
                 FontFamily = new FontFamily("Segoe UI"),
             };
 
-            border.Child = textBlock;
+            bubble.Child = textBlock;
 
-            Grid.SetColumn(border, isUser ? 1 : 0);
-            container.Children.Add(border);
-
-            var label = new TextBlock
+            if (isUser)
             {
-                Text = isUser ? "You" : "Other",
-                FontSize = 9,
-                Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#6B7280")),
-                FontFamily = new FontFamily("Segoe UI"),
-                Margin = new Thickness(isUser ? 0 : 4, 0, isUser ? 4 : 0, 0),
-                HorizontalAlignment = isUser ? HorizontalAlignment.Right : HorizontalAlignment.Left,
-                VerticalAlignment = VerticalAlignment.Bottom,
-            };
-            Grid.SetColumn(label, isUser ? 0 : 1);
-            container.Children.Add(label);
-
-            return (container, border, textBlock);
-        }
-
-        private void FadeHighlight(Border border, bool isUser)
-        {
-            var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-            timer.Tick += (s, e) =>
+                stack.Children.Add(bubble);
+                stack.Children.Add(avatar);
+            }
+            else
             {
-                border.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#12FFFFFF"));
-                timer.Stop();
-            };
-            timer.Start();
+                stack.Children.Add(avatar);
+                stack.Children.Add(bubble);
+            }
+
+            row.Children.Add(stack);
+            return (row, bubble, textBlock);
         }
 
         #endregion

@@ -1,5 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -28,9 +30,12 @@ namespace SnapEye
         private readonly SpeakerCaptureService speakerCaptureService;
         private readonly ScreenCaptureService screenCaptureService;
         private readonly StreamingResponseService streamingService;
+        private readonly ConversationHistoryService history;
+        private readonly ConversationTitleService titleService;
 
         // State
-        private bool isTranscribing;
+        private OverlaySessionPhase sessionPhase = OverlaySessionPhase.Ready;
+        private string? lastScreenOcr;
         private bool isInvisibleToCapture;
         private bool isExpanded = true;
         private SessionManager.SessionData? currentSession;
@@ -41,6 +46,8 @@ namespace SnapEye
         // Pulse animation for live dot
         private DispatcherTimer? liveDotPulseTimer;
         private bool liveDotVisible = true;
+
+        private bool IsListening => sessionPhase == OverlaySessionPhase.Listening;
 
         public OverlayWindow()
         {
@@ -54,6 +61,8 @@ namespace SnapEye
             speakerCaptureService = new SpeakerCaptureService();
             screenCaptureService = new ScreenCaptureService(AppConfig.BackendHttpUrl);
             streamingService = new StreamingResponseService(AppConfig.BackendHttpUrl);
+            history = new ConversationHistoryService();
+            titleService = new ConversationTitleService(AppConfig.BackendHttpUrl);
 
             InitializeWindowPosition();
             SubscribeToEvents();
@@ -67,6 +76,24 @@ namespace SnapEye
             transcriptionService.SetAuthToken(session.AccessToken);
             screenCaptureService.SetAuthToken(session.AccessToken);
             streamingService.SetAuthToken(session.AccessToken);
+            titleService.SetAuthToken(session.AccessToken);
+        }
+
+        /// <summary>Background-generate an AI title for the given session and patch the saved JSON file.</summary>
+        private async Task GenerateAndSaveTitleAsync(ConversationSession? session)
+        {
+            try
+            {
+                if (session == null || session.Messages.Count == 0) return;
+                string title = await titleService.GenerateAsync(session).ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(title)) return;
+                ConversationHistoryService.UpdateSavedSessionTitle(session.SessionId, title);
+                Console.WriteLine($"[History] Title generated for {session.SessionId[..Math.Min(8, session.SessionId.Length)]}: {title}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[History] Title gen error: {ex.Message}");
+            }
         }
 
         #region Initialization
@@ -114,7 +141,12 @@ namespace SnapEye
             // Streaming response events
             streamingService.StreamStarted += (s, _) => Dispatcher.Invoke(() => AlphaRegion.BeginStreamingResponse());
             streamingService.TokenReceived += (s, token) => Dispatcher.Invoke(() => AlphaRegion.AppendStreamingToken(token));
-            streamingService.ResponseComplete += (s, full) => Dispatcher.Invoke(() => AlphaRegion.EndStreamingResponse(full));
+            streamingService.ResponseComplete += (s, full) => Dispatcher.Invoke(() =>
+            {
+                AlphaRegion.EndStreamingResponse(full);
+                if (!string.IsNullOrWhiteSpace(full))
+                    history.Append(ConversationMessageKind.AssistantAnswer, full);
+            });
             streamingService.ErrorOccurred += (s, err) => Dispatcher.Invoke(() => AlphaRegion.ShowStreamingError(err));
 
             // Auth
@@ -186,19 +218,68 @@ namespace SnapEye
 
         private void UpdateStealthIcon()
         {
-            if (isInvisibleToCapture)
-            {
-                StealthIcon.Fill = new SolidColorBrush(Color.FromRgb(0x2D, 0x7F, 0xF9));
-            }
-            else
-            {
-                StealthIcon.Fill = new SolidColorBrush(Color.FromRgb(0x9C, 0xA3, 0xAF));
-            }
+            // Stealth is toggled from the ⋯ menu; no toolbar glyph in this layout.
         }
 
         #endregion
 
         #region Window Events
+
+        private void DragHandle_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+        {
+            if (e.ChangedButton == MouseButton.Left)
+            {
+                try { DragMove(); } catch { /* drag already in progress */ }
+            }
+        }
+
+        private void DashboardLogo_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                // Return to dashboard; the launch flow subscribed to Closed to show it again.
+                Close();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] Dashboard logo error: {ex.Message}");
+            }
+        }
+
+        private async void EndSession_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (IsListening)
+                    await StopTranscriptionAsync();
+                else
+                {
+                    streamingService.CancelCurrentStream();
+                    UpdateListeningUI(false);
+                    StopSessionTimer();
+                }
+
+                transcriptionService.ClearConversation();
+
+                // Capture the just-ended session before starting a new one so we can
+                // generate an AI title for it in the background.
+                var endedSession = history.Current;
+                history.EndCurrentSession();
+                history.StartNewSession();
+                _ = GenerateAndSaveTitleAsync(endedSession);
+
+                AlphaRegion.ClearAll();
+                lastScreenOcr = null;
+                TranscriptToggle.IsChecked = false;
+                AlphaRegion.SwitchToChatTab();
+                AlphaRegion.SetMarkdownContent("**Session ended.**\n\nPrevious conversation saved. Tap **Listen** to start again, or use **Ask AI** anytime.");
+                sessionPhase = OverlaySessionPhase.Ready;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] End session error: {ex.Message}");
+            }
+        }
 
         private void Window_MouseDown(object sender, MouseButtonEventArgs e)
         {
@@ -225,6 +306,11 @@ namespace SnapEye
                     e.Handled = true;
                 }
                 // Ctrl+Shift+H: Hide/Show
+                else if (e.Key == Key.C && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
+                {
+                    CopyAnswer_Click(sender, e);
+                    e.Handled = true;
+                }
                 else if (e.Key == Key.H && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
                 {
                     this.Visibility = this.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
@@ -276,7 +362,9 @@ namespace SnapEye
         {
             try
             {
-                if (!isTranscribing)
+                if (sessionPhase == OverlaySessionPhase.Connecting)
+                    return;
+                if (!IsListening)
                     await StartTranscriptionAsync();
                 else
                     await StopTranscriptionAsync();
@@ -293,20 +381,12 @@ namespace SnapEye
             try
             {
                 isExpanded = !isExpanded;
-                ContentPanel.Visibility = isExpanded ? Visibility.Visible : Visibility.Collapsed;
-                InputBar.Visibility = isExpanded ? Visibility.Visible : Visibility.Collapsed;
+                SessionBody.Visibility = isExpanded ? Visibility.Visible : Visibility.Collapsed;
 
-                // Update chevron direction
                 if (isExpanded)
-                {
-                    // Chevron up (collapse)
                     ChevronIcon.Data = Geometry.Parse("M12,8L6,14L7.41,15.41L12,10.83L16.59,15.41L18,14L12,8Z");
-                }
                 else
-                {
-                    // Chevron down (expand)
                     ChevronIcon.Data = Geometry.Parse("M16.59,8.59L12,13.17L7.41,8.59L6,10L12,16L18,10L16.59,8.59Z");
-                }
             }
             catch (Exception ex)
             {
@@ -337,30 +417,6 @@ namespace SnapEye
         private void Close_Click(object sender, RoutedEventArgs e)
         {
             this.Visibility = Visibility.Collapsed;
-        }
-
-        private void Home_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                // Expand panel if collapsed
-                if (!isExpanded)
-                {
-                    isExpanded = true;
-                    ContentPanel.Visibility = Visibility.Visible;
-                    InputBar.Visibility = Visibility.Visible;
-                    ChevronIcon.Data = Geometry.Parse("M12,8L6,14L7.41,15.41L12,10.83L16.59,15.41L18,14L12,8Z");
-                }
-
-                // Switch to chat tab and show welcome
-                AlphaRegion.SwitchToChatTab();
-                TranscriptToggle.IsChecked = false;
-                AlphaRegion.SetMarkdownContent("**Welcome to SnapEye AI**\n\nSelect a mode above, then start listening or ask a question below.");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[UI] Home click error: {ex.Message}");
-            }
         }
 
         private void ModeSelector_Changed(object sender, SelectionChangedEventArgs e)
@@ -405,20 +461,42 @@ namespace SnapEye
             try
             {
                 if (sender is Button btn && btn.Tag is QuickActionConfig action)
-                {
-                    AlphaRegion.SwitchToChatTab();
-                    TranscriptToggle.IsChecked = false;
-                    AlphaRegion.BeginStreamingResponse(action.Label);
-
-                    string systemPrompt = GetCurrentSystemPrompt();
-                    await streamingService.StreamResponseAsync(action.Prompt, systemPrompt);
-                }
+                    await RunContextualPromptAsync(action.Label, action.Prompt);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[UI] Quick action error: {ex.Message}");
                 AlphaRegion.ShowStreamingError(ex.Message);
             }
+        }
+
+        private async Task RunContextualPromptAsync(string displayLabel, string userPrompt)
+        {
+            ExpandSessionIfCollapsed();
+            AlphaRegion.SwitchToChatTab();
+            TranscriptToggle.IsChecked = false;
+
+            // Log quick-action label as a user prompt in the chat thread + transcript view.
+            AlphaRegion.AddUserTranscription(displayLabel);
+            history.Append(ConversationMessageKind.QuickAction, userPrompt, displayLabel);
+
+            AlphaRegion.BeginStreamingResponse(displayLabel);
+
+            string systemPrompt = GetCurrentSystemPrompt();
+            string context = BuildConversationContext();
+            string fullMessage = string.IsNullOrEmpty(context)
+                ? userPrompt
+                : context + "\n\nUSER REQUEST: " + userPrompt;
+
+            await streamingService.StreamResponseAsync(fullMessage, systemPrompt);
+        }
+
+        private void ExpandSessionIfCollapsed()
+        {
+            if (isExpanded) return;
+            isExpanded = true;
+            SessionBody.Visibility = Visibility.Visible;
+            ChevronIcon.Data = Geometry.Parse("M12,8L6,14L7.41,15.41L12,10.83L16.59,15.41L18,14L12,8Z");
         }
 
         #endregion
@@ -443,21 +521,18 @@ namespace SnapEye
 
                 ChatInput.Text = "";
 
-                // Ensure panel is expanded
-                if (!isExpanded)
-                {
-                    isExpanded = true;
-                    ContentPanel.Visibility = Visibility.Visible;
-                    InputBar.Visibility = Visibility.Visible;
-                    ChevronIcon.Data = Geometry.Parse("M12,8L6,14L7.41,15.41L12,10.83L16.59,15.41L18,14L12,8Z");
-                }
+                ExpandSessionIfCollapsed();
 
                 AlphaRegion.SwitchToChatTab();
                 TranscriptToggle.IsChecked = false;
+
+                // Record typed prompt in chat history + transcription "You" bubble.
+                AlphaRegion.AddUserTranscription(query);
+                history.Append(ConversationMessageKind.UserTyped, query);
+
                 AlphaRegion.BeginStreamingResponse(query);
 
-                string systemPrompt = GetCurrentSystemPrompt();
-                await streamingService.StreamResponseAsync(query, systemPrompt);
+                await StreamUserDirectedLlmAsync(query);
             }
             catch (Exception ex)
             {
@@ -470,19 +545,17 @@ namespace SnapEye
         {
             try
             {
-                // Ensure panel is expanded
-                if (!isExpanded)
-                {
-                    isExpanded = true;
-                    ContentPanel.Visibility = Visibility.Visible;
-                    InputBar.Visibility = Visibility.Visible;
-                    ChevronIcon.Data = Geometry.Parse("M12,8L6,14L7.41,15.41L12,10.83L16.59,15.41L18,14L12,8Z");
-                }
+                ExpandSessionIfCollapsed();
 
                 AlphaRegion.ShowLoading();
                 string? ocrText = await screenCaptureService.CaptureAndOcrAsync();
                 if (!string.IsNullOrEmpty(ocrText))
+                {
+                    lastScreenOcr = ocrText;
                     AlphaRegion.SetMarkdownContent($"## Screen Capture\n\n{ocrText}");
+                    if (IsListening && transcriptionService.IsConnected)
+                        await transcriptionService.SendScreenContextAsync(ocrText);
+                }
                 else
                     AlphaRegion.ShowError("No text extracted from screen.");
             }
@@ -492,21 +565,82 @@ namespace SnapEye
             }
         }
 
+        private void CopyAnswer_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                string md = AlphaRegion.GetChatMarkdown();
+                if (string.IsNullOrWhiteSpace(md))
+                    return;
+                Clipboard.SetText(md);
+            }
+            catch (Exception ex)
+            {
+                AlphaRegion.ShowError($"Copy failed: {ex.Message}");
+            }
+        }
+
+        private async Task StreamUserDirectedLlmAsync(string question)
+        {
+            string transcript = BuildConversationContext();
+            string systemPrompt = GetCurrentSystemPrompt();
+            await streamingService.StreamContextResponseAsync(
+                question,
+                transcript,
+                "",
+                lastScreenOcr ?? "",
+                systemPrompt,
+                null);
+        }
+
         private string GetCurrentSystemPrompt()
         {
+            string modePrompt = "You are SnapEye, a helpful AI assistant.";
             if (selectedModeIndex >= 0 && selectedModeIndex < AppConfig.Modes.Count)
-                return AppConfig.Modes[selectedModeIndex].SystemPrompt;
-            return "You are SnapEye, a helpful AI assistant.";
+                modePrompt = AppConfig.Modes[selectedModeIndex].SystemPrompt;
+
+            return modePrompt +
+                "\n\nIMPORTANT: You have access to the live conversation transcript provided in the user message. " +
+                "Use it to give context-aware answers. Never say you don't have access to the conversation. " +
+                "Be concise and use markdown for readability.";
+        }
+
+        private string BuildConversationContext()
+        {
+            try
+            {
+                var messages = transcriptionService.Conversation.Messages;
+                if (messages == null || messages.Count == 0)
+                    return "";
+
+                var sb = new StringBuilder();
+                sb.AppendLine("LIVE CONVERSATION TRANSCRIPT:");
+                sb.AppendLine("---");
+                int start = Math.Max(0, messages.Count - 30);
+                for (int i = start; i < messages.Count; i++)
+                {
+                    var msg = messages[i];
+                    string speaker = msg.Source == MessageSource.Microphone ? "You" : "Other";
+                    sb.AppendLine($"[{speaker}]: {msg.Text}");
+                }
+                sb.AppendLine("---");
+                return sb.ToString();
+            }
+            catch
+            {
+                return "";
+            }
         }
 
         #endregion
 
         #region Transcription Control
 
-        private async System.Threading.Tasks.Task StartTranscriptionAsync()
+        private async Task StartTranscriptionAsync()
         {
             try
             {
+                sessionPhase = OverlaySessionPhase.Connecting;
                 bool connected = await transcriptionService.ConnectAsync(
                     AppConfig.DeepgramModel,
                     AppConfig.DeepgramLanguage,
@@ -515,42 +649,41 @@ namespace SnapEye
 
                 if (connected)
                 {
-                    isTranscribing = true;
+                    sessionPhase = OverlaySessionPhase.Listening;
                     audioCaptureService.StartCapture();
                     speakerCaptureService.StartCapture();
 
                     UpdateListeningUI(true);
                     StartSessionTimer();
 
-                    // Ensure panel is expanded and show transcription
-                    if (!isExpanded)
-                    {
-                        isExpanded = true;
-                        ContentPanel.Visibility = Visibility.Visible;
-                        InputBar.Visibility = Visibility.Visible;
-                        ChevronIcon.Data = Geometry.Parse("M12,8L6,14L7.41,15.41L12,10.83L16.59,15.41L18,14L12,8Z");
-                    }
+                    if (!string.IsNullOrWhiteSpace(lastScreenOcr))
+                        await transcriptionService.SendScreenContextAsync(lastScreenOcr);
+
+                    ExpandSessionIfCollapsed();
 
                     AlphaRegion.SwitchToTranscriptionTab();
                     TranscriptToggle.IsChecked = true;
                 }
                 else
                 {
+                    sessionPhase = OverlaySessionPhase.Ready;
                     AlphaRegion.ShowError("Failed to connect to transcription service.");
                 }
             }
             catch (Exception ex)
             {
+                sessionPhase = OverlaySessionPhase.Ready;
                 Console.WriteLine($"[Transcription] Start error: {ex.Message}");
                 AlphaRegion.ShowError($"Connection error: {ex.Message}");
             }
         }
 
-        private async System.Threading.Tasks.Task StopTranscriptionAsync()
+        private async Task StopTranscriptionAsync()
         {
             try
             {
-                isTranscribing = false;
+                streamingService.CancelCurrentStream();
+                sessionPhase = OverlaySessionPhase.Ready;
                 audioCaptureService.StopCapture();
                 speakerCaptureService.StopCapture();
                 await transcriptionService.DisconnectAsync();
@@ -568,52 +701,51 @@ namespace SnapEye
         {
             Dispatcher.Invoke(() =>
             {
-                // Find template elements via the visual tree
-                var listenBtnText = FindListenBtnText();
                 var liveDot = FindLiveDot();
                 var listenBorder = FindListenBtnBorder();
+                var listenIcon = FindListenIcon();
 
                 if (listening)
                 {
-                    // Update listen button text and show live dot
-                    if (listenBtnText != null) listenBtnText.Text = "00:00";
                     if (liveDot != null) liveDot.Visibility = Visibility.Visible;
 
-                    // Change button to listening style (slightly different blue with glow)
+                    if (listenIcon != null)
+                        listenIcon.Fill = new SolidColorBrush(Color.FromRgb(0xFC, 0xA5, 0xA5));
+
                     if (listenBorder != null)
                     {
-                        listenBorder.Background = new SolidColorBrush(Color.FromRgb(0x1A, 0x6F, 0xE8));
-                        if (listenBorder.Effect is System.Windows.Media.Effects.DropShadowEffect glow)
+                        listenBorder.Background = new SolidColorBrush(Color.FromArgb(0x55, 0xDC, 0x26, 0x26));
+                        listenBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(0xDC, 0x26, 0x26));
+                        listenBorder.Effect = new System.Windows.Media.Effects.DropShadowEffect
                         {
-                            glow.BlurRadius = 12;
-                            glow.Opacity = 0.5;
-                        }
+                            Color = Color.FromRgb(0xDC, 0x26, 0x26),
+                            BlurRadius = 12,
+                            ShadowDepth = 0,
+                            Opacity = 0.5
+                        };
                     }
 
-                    // Update eye icon to active
-                    EyeIcon.Fill = new SolidColorBrush(Color.FromRgb(0x22, 0xC5, 0x5E));
-
-                    // Start live dot pulse
                     StartLiveDotPulse();
                 }
                 else
                 {
-                    // Reset listen button
-                    if (listenBtnText != null) listenBtnText.Text = "Start Listening";
                     if (liveDot != null) liveDot.Visibility = Visibility.Collapsed;
+
+                    if (listenIcon != null)
+                        listenIcon.Fill = new SolidColorBrush(Color.FromRgb(0x93, 0xC5, 0xFD));
 
                     if (listenBorder != null)
                     {
-                        listenBorder.Background = new SolidColorBrush(Color.FromRgb(0x2D, 0x7F, 0xF9));
-                        if (listenBorder.Effect is System.Windows.Media.Effects.DropShadowEffect glow)
+                        listenBorder.Background = new SolidColorBrush(Color.FromArgb(0x33, 0x25, 0x63, 0xEB));
+                        listenBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(0x25, 0x63, 0xEB));
+                        listenBorder.Effect = new System.Windows.Media.Effects.DropShadowEffect
                         {
-                            glow.BlurRadius = 0;
-                            glow.Opacity = 0;
-                        }
+                            Color = Color.FromRgb(0x25, 0x63, 0xEB),
+                            BlurRadius = 10,
+                            ShadowDepth = 0,
+                            Opacity = 0.35
+                        };
                     }
-
-                    // Reset eye icon
-                    EyeIcon.Fill = new SolidColorBrush(Color.FromRgb(0x9C, 0xA3, 0xAF));
 
                     StopLiveDotPulse();
                 }
@@ -658,6 +790,11 @@ namespace SnapEye
             return FindTemplateChild<Border>(MicToggleBtn, "ListenBtnBorder");
         }
 
+        private System.Windows.Shapes.Path? FindListenIcon()
+        {
+            return FindTemplateChild<System.Windows.Shapes.Path>(MicToggleBtn, "ListenIcon");
+        }
+
         private static T? FindTemplateChild<T>(Control parent, string name) where T : FrameworkElement
         {
             if (parent.Template == null) return null;
@@ -699,9 +836,15 @@ namespace SnapEye
                 Dispatcher.Invoke(() =>
                 {
                     if (msg.Source == MessageSource.Microphone)
+                    {
                         AlphaRegion.AddUserTranscription(msg.Text, msg.IsNewSegment);
+                        history.Append(ConversationMessageKind.UserSpoken, msg.Text);
+                    }
                     else
+                    {
                         AlphaRegion.AddSystemTranscription(msg.Text, msg.IsNewSegment);
+                        history.Append(ConversationMessageKind.OtherSpoken, msg.Text);
+                    }
                 });
             }
             catch (Exception ex)
@@ -719,9 +862,10 @@ namespace SnapEye
         {
             Dispatcher.Invoke(() =>
             {
-                if (isTranscribing)
+                if (IsListening)
                 {
-                    isTranscribing = false;
+                    sessionPhase = OverlaySessionPhase.Ready;
+                    streamingService.CancelCurrentStream();
                     audioCaptureService.StopCapture();
                     speakerCaptureService.StopCapture();
                     UpdateListeningUI(false);
@@ -744,7 +888,7 @@ namespace SnapEye
         {
             try
             {
-                if (isTranscribing && transcriptionService.IsConnected)
+                if (IsListening && transcriptionService.IsConnected)
                     await transcriptionService.SendAudioAsync(e.AudioData, MessageSource.Microphone);
             }
             catch (Exception ex)
@@ -757,7 +901,7 @@ namespace SnapEye
         {
             try
             {
-                if (isTranscribing && transcriptionService.IsConnected)
+                if (IsListening && transcriptionService.IsConnected)
                     await transcriptionService.SendAudioAsync(e.AudioData, MessageSource.Speaker);
             }
             catch (Exception ex)
@@ -796,8 +940,12 @@ namespace SnapEye
 
         private void OnAISuggestionCompleted(object? sender, string response)
         {
-            Dispatcher.Invoke(() => AlphaRegion.EndStreamingResponse(
-                string.IsNullOrEmpty(response) ? null : response));
+            Dispatcher.Invoke(() =>
+            {
+                AlphaRegion.EndStreamingResponse(string.IsNullOrEmpty(response) ? null : response);
+                if (!string.IsNullOrWhiteSpace(response))
+                    history.Append(ConversationMessageKind.AssistantAnswer, response);
+            });
         }
 
         private void OnAISuggestionError(object? sender, string error)
@@ -816,6 +964,10 @@ namespace SnapEye
             {
                 sessionTimer?.Stop();
                 liveDotPulseTimer?.Stop();
+                var endedOnClose = history?.Current;
+                history?.EndCurrentSession();
+                if (endedOnClose != null)
+                    _ = GenerateAndSaveTitleAsync(endedOnClose);
                 audioCaptureService?.Dispose();
                 speakerCaptureService?.Dispose();
                 transcriptionService?.Dispose();

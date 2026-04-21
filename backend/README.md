@@ -5,6 +5,7 @@ Enterprise-grade AI-powered backend service for image analysis, text search, and
 ## 🌟 Features
 
 ### 🖼️ Image Analysis
+
 - **GPT-4 Vision Integration**: Advanced image understanding
 - **Object Detection**: Identify objects, people, and activities
 - **OCR**: Extract text from images
@@ -12,18 +13,21 @@ Enterprise-grade AI-powered backend service for image analysis, text search, and
 - **Question Answering**: Answer specific questions about images
 
 ### 📝 Text Search
+
 - **Natural Language Processing**: Understanding complex queries
 - **Information Retrieval**: Accurate, fact-based answers
 - **Structured Responses**: Well-formatted markdown output
 - **Contextual Explanations**: Detailed reasoning
 
 ### 🎙️ Real-time Transcription
+
 - **Live Speech-to-Text**: Real-time audio transcription
 - **Conversational AI**: Interactive dialogue management
 - **Multiple Voices**: Choose from 6 different voice options
 - **Auto Turn Detection**: Intelligent conversation handling
 
 ### 🔒 Security
+
 - **JWT Authentication**: Secure token-based auth
 - **End-to-End Encryption**: Fernet symmetric encryption
 - **API Key Management**: Secure key hashing and validation
@@ -53,6 +57,7 @@ backend/
 ## 🚀 Quick Start
 
 ### Prerequisites
+
 - Python 3.10+
 - OpenAI API Key
 - pip or conda
@@ -60,11 +65,13 @@ backend/
 ### Installation
 
 1. **Clone the repository**
+
 ```bash
 cd backend
 ```
 
 2. **Create virtual environment**
+
 ```bash
 python -m venv venv
 
@@ -76,28 +83,32 @@ source venv/bin/activate
 ```
 
 3. **Install dependencies**
+
 ```bash
 pip install -r requirements.txt
 ```
 
 4. **Configure environment**
+
 ```bash
 cp .env.example .env
 # Edit .env with your configuration
 ```
 
 5. **Run the server**
+
 ```bash
 # Development
 python main.py
 
 # OR with uvicorn directly
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --reload --host 0.0.0.0 --port 8080
 ```
 
 6. **Access API documentation**
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+
+- Swagger UI: http://localhost:8080/docs
+- ReDoc: http://localhost:8080/redoc
 
 ## ⚙️ Configuration
 
@@ -116,7 +127,7 @@ ENCRYPTION_KEY=your-encryption-key-here
 # App Settings
 DEBUG=False
 API_HOST=0.0.0.0
-API_PORT=8000
+API_PORT=8080
 LOG_LEVEL=INFO
 
 # SSL (Optional)
@@ -129,8 +140,9 @@ SSL_CERTFILE=path/to/cert.pem
 ### Authentication
 
 **Login**
+
 ```bash
-curl -X POST "http://localhost:8000/auth/login" \
+curl -X POST "http://localhost:8080/auth/login" \
   -H "Content-Type: application/json" \
   -d '{
     "username": "user123",
@@ -139,6 +151,7 @@ curl -X POST "http://localhost:8000/auth/login" \
 ```
 
 **Response:**
+
 ```json
 {
   "access_token": "eyJ...",
@@ -151,7 +164,7 @@ curl -X POST "http://localhost:8000/auth/login" \
 ### Image Search
 
 ```bash
-curl -X POST "http://localhost:8000/api/search/image" \
+curl -X POST "http://localhost:8080/api/search/image" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -F "file=@image.jpg" \
   -F "query=What objects are in this image?" \
@@ -161,7 +174,7 @@ curl -X POST "http://localhost:8000/api/search/image" \
 ### Text Search
 
 ```bash
-curl -X POST "http://localhost:8000/api/search/text" \
+curl -X POST "http://localhost:8080/api/search/text" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -176,47 +189,55 @@ curl -X POST "http://localhost:8000/api/search/text" \
 ```javascript
 // JavaScript example
 const ws = new WebSocket(
-  'ws://localhost:8000/api/transcribe/live?token=YOUR_TOKEN&voice=alloy'
+  "ws://localhost:8080/api/transcribe/live?token=YOUR_TOKEN&voice=alloy"
 );
 
 ws.onopen = () => {
-  console.log('Connected');
+  console.log("Connected");
 };
 
 ws.onmessage = (event) => {
   const data = JSON.parse(event.data);
-  console.log('Received:', data);
+  console.log("Received:", data);
 };
 
 // Send audio data
-ws.send(JSON.stringify({
-  type: 'input_audio_buffer.append',
-  audio: base64AudioData
-}));
+ws.send(
+  JSON.stringify({
+    type: "input_audio_buffer.append",
+    audio: base64AudioData,
+  })
+);
 ```
 
 ## 🧩 OOP Design Patterns Used
 
 ### 1. **Factory Pattern**
+
 - `OpenAIServiceFactory`: Creates service instances
 - `create_transcription_service()`: Factory function
 
 ### 2. **Strategy Pattern**
+
 - `BaseAIService`: Abstract base class
 - `ImageSearchService`, `TextSearchService`: Concrete strategies
 
 ### 3. **Singleton Pattern**
+
 - `settings`: Global configuration instance
 - `security_manager`: Global security instance
 
 ### 4. **Dependency Injection**
+
 - Services injected via constructors
 - FastAPI dependencies for authentication
 
 ### 5. **Repository Pattern**
+
 - Separation of data access logic (prepared for database integration)
 
 ### 6. **Facade Pattern**
+
 - `OpenAIServiceFactory`: Simplifies service creation
 - `PromptTemplates`: Centralizes prompt management
 
@@ -297,4 +318,3 @@ MIT License - See LICENSE file for details
 ---
 
 Built with ❤️ using FastAPI, OpenAI, and modern Python practices.
-

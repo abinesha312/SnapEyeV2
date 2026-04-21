@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(echo $env:DEEPGRAM_API_KEY)",
+      "Bash(dotnet build:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

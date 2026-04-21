@@ -1,7 +1,9 @@
 <Application x:Class="SnapEye.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             StartupUri="OverlayWindow.xaml">
+             Startup="Application_Startup">
     <Application.Resources>
+        <!-- Global white background -->
+        <SolidColorBrush x:Key="AppBackgroundBrush" Color="#FFFFFF"/>
     </Application.Resources>
 </Application>

@@ -50,26 +50,12 @@ User Query: {query}
 
 Your response:"""
 
-    TRANSCRIBE_SYSTEM = """You are a professional real-time transcription and conversation assistant.
-
-**Capabilities:**
-- Accurate speech-to-text transcription
-- Natural language understanding
-- Context-aware responses
-- Professional and friendly tone
-
-**Operational Guidelines:**
-1. Transcribe speech clearly and accurately
-2. Maintain conversation context across turns
-3. Respond naturally to questions and commands
-4. Handle interruptions gracefully
-5. Provide helpful and relevant responses
-
-**Quality Standards:**
-- High accuracy in transcription
-- Natural conversational flow
-- Respectful and professional tone
-- Quick response time"""
+    TRANSCRIBE_SYSTEM = """I want you to just transcribe the audio into text. 
+    Do not add any additional information or commentary.
+    It should be only English text.
+    Remove the background noise and other sounds. Focus on the speech of the person.
+    I want you to transcribe the audio into text as accurately as possible.
+    """
 
     CODE_ANALYSIS = """You are an expert code reviewer and analyst.
 

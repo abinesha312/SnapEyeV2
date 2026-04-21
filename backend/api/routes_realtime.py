@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from security import security_manager
 from services.deepgram_live_service import deepgram_session_manager
+from services.context_service import context_session_manager
 from config import settings
 
 # Configure logging
@@ -172,11 +173,9 @@ async def audio_transcribe(
         logger.info(f"Created Deepgram Live session: {session_id}")
         
         # Enable AI pipeline (keyword detection -> context -> LLM -> streaming response)
+        context_mgr = context_session_manager.get_or_create(session_id)
         try:
             from services.keyword_service import keyword_detector
-            from services.context_service import context_session_manager
-            
-            context_mgr = context_session_manager.get_or_create(session_id)
             
             async def on_ai_suggestion(msg):
                 try:
@@ -207,7 +206,12 @@ async def audio_transcribe(
                 "chunk_size": "200-300ms recommended (9.6KB-14.4KB)",
                 "endpointing": f"{endpointing_ms}ms silence triggers new message",
                 "interim_results": "Enabled for fast UI updates",
-                "actions": ["get_messages", "reset", "finalize"]
+                "actions": [
+                    "get_messages",
+                    "reset",
+                    "finalize",
+                    "set_screen_context",
+                ]
             }
         })
         
@@ -266,12 +270,32 @@ async def audio_transcribe(
                                 "message": current_msg
                             })
                             logger.info(f"Message manually finalized: {session_id}")
+
+                        elif action == "set_screen_context":
+                            raw = command.get("text") or command.get("ocr") or ""
+                            text = (raw or "")[:12000]
+                            context_mgr.set_screen_context(text)
+                            await websocket.send_json({
+                                "type": "screen_context.ack",
+                                "length": len(text),
+                                "status": "ok",
+                            })
+                            logger.debug(
+                                "Screen context updated for %s (%d chars)",
+                                session_id,
+                                len(text),
+                            )
                         
                         else:
                             await websocket.send_json({
                                 "type": "error",
                                 "error": f"Unknown action: {action}",
-                                "valid_actions": ["get_messages", "reset", "finalize"]
+                                "valid_actions": [
+                                    "get_messages",
+                                    "reset",
+                                    "finalize",
+                                    "set_screen_context",
+                                ],
                             })
                     
                     except json.JSONDecodeError:
@@ -319,6 +343,7 @@ async def audio_transcribe(
                 pass
             
             await deepgram_session_manager.remove_session(session_id)
+            context_session_manager.remove(session_id)
             logger.info(f"Cleaned up session: {session_id}")
 
 
