@@ -1,0 +1,77 @@
+# SnapEye AI Backend Configuration Example
+# Copy this file to config.yaml and configure your settings
+# API keys should be set via environment variables (.env file)
+
+app:
+  name: "SnapEye AI"
+  version: "2.0.0"
+  debug: false
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  cors_origins:
+    - "*"
+  log_level: "INFO"
+  log_file: "logs/snapeye.log"
+
+security:
+  jwt_algorithm: "HS256"
+  access_token_expire_minutes: 60
+  refresh_token_expire_days: 7
+
+deepgram:
+  model: "nova-3"
+  language: "en"
+  smart_format: true
+  punctuate: true
+  diarize: true
+
+audio:
+  chunk_duration: 2.0
+  pause_threshold: 5.0
+  sample_rate: 24000
+  channels: 1
+  encoding: "linear16"
+
+openai:
+  model: "gpt-4o"
+  embedding_model: "text-embedding-3-small"
+
+anthropic:
+  model: "claude-sonnet-4-20250514"
+
+llm:
+  primary_provider: "openai"
+  fallback_provider: "anthropic"
+  stream_enabled: true
+  max_tokens: 4096
+  temperature: 0.7
+
+rag:
+  chunk_size: 500
+  chunk_overlap: 50
+  top_k: 5
+  data_dir: "./data/chromadb"
+
+context:
+  max_tokens: 100000
+  summary_threshold: 80000
+
+keyword_detection:
+  debounce_ms: 2000
+
+storage:
+  sqlite_db_path: "./data/snapeye.db"
+
+rate_limiting:
+  per_minute: 60
+  per_hour: 1000
+
+file_upload:
+  max_size_mb: 10
+  allowed_image_types:
+    - "image/jpeg"
+    - "image/png"
+    - "image/jpg"
+    - "image/webp"

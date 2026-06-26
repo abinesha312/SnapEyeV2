@@ -1,0 +1,91 @@
+# SnapEye WPF Application Configuration Example
+# Copy this file to config.yaml and configure your settings
+
+backend:
+  http_url: "http://localhost:8080"
+  websocket_url: "ws://localhost:8080"
+
+auth:
+  default_username: "snapeye_user"
+  default_api_key: "your-api-key-here"
+  session_expiry_days: 90
+
+audio:
+  buffer_size: 4096
+  sample_rate: 24000
+  channels: 1
+
+transcription:
+  model: "nova-3"
+  language: "en"
+  pause_threshold: 0.5
+  endpointing_ms: 300
+
+ui:
+  width: 380
+  height: 620
+  opacity: 0.95
+  min_opacity: 0.3
+  max_opacity: 1.0
+  corner_radius: 16
+  invisible_to_capture: true
+  
+  # Theme Colors
+  accent_color: "#2563EB"
+  accent_color_light: "#60A5FA"
+  background_primary: "#27272A"
+  background_secondary: "#3F3F46"
+  background_card: "#3F3F46"
+  text_primary: "#FFFFFF"
+  text_secondary: "#A1A1AA"
+  text_muted: "#71717A"
+  border_color: "#3F3F46"
+  success_color: "#22C55E"
+  error_color: "#EF4444"
+  warning_color: "#F59E0B"
+
+# AI Modes - Customize your prompts
+modes:
+  - id: "general-assistant"
+    name: "General Assistant"
+    icon: "brain"
+    system_prompt: "You are SnapEye, a helpful AI meeting assistant."
+  
+  - id: "interview-mode"
+    name: "Interview Mode"
+    icon: "briefcase"
+    system_prompt: "You are an interview assistant. Help the user prepare answers, understand questions, and present themselves professionally."
+  
+  - id: "sales-mode"
+    name: "Sales Mode"
+    icon: "chart"
+    system_prompt: "You are a sales assistant. Help identify customer needs, suggest solutions, and close deals effectively."
+  
+  - id: "meeting-notes"
+    name: "Meeting Notes"
+    icon: "clipboard"
+    system_prompt: "You are a meeting assistant. Capture key points, action items, and decisions clearly."
+
+# Quick Actions - Contextual prompts
+quick_actions:
+  - label: "What should I say?"
+    prompt: "Based on the conversation transcript, suggest what I should say next. Be specific and actionable."
+  
+  - label: "Follow up"
+    prompt: "Based on the conversation transcript, suggest 2-3 follow-up questions I could ask."
+  
+  - label: "Fact check"
+    prompt: "Review the conversation transcript and verify any facts or claims that were mentioned. Highlight anything that may need checking."
+  
+  - label: "Who am I talking to?"
+    prompt: "Based on the conversation transcript, identify who I am talking to and any details about them."
+  
+  - label: "Recap"
+    prompt: "Provide a brief recap of the conversation so far, including key topics discussed and any decisions made."
+
+# Keyboard Shortcuts
+keyboard_shortcuts:
+  toggle_listen: "Ctrl+Shift+L"
+  screenshot: "Ctrl+Shift+S"
+  hide_show: "Ctrl+Shift+H"
+  ask_ai: "Ctrl+Enter"

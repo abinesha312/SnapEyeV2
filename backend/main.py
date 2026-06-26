@@ -14,7 +14,8 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from config import settings
-from api import routes_auth, routes_search, routes_realtime
+from api import routes_auth, routes_search, routes_realtime, routes_deepgram_live
+from api import routes_llm, routes_rag, routes_ocr
 from models import HealthResponse, ErrorResponse
 
 # Configure logging
@@ -46,14 +47,34 @@ async def lifespan(app: FastAPI):
     Handles startup and shutdown events
     """
     # Startup
-    logger.info(f"🚀 Starting {settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info(f"Environment: {'Development' if settings.DEBUG else 'Production'}")
     logger.info(f"OpenAI Model: {settings.OPENAI_MODEL}")
+    
+    # Ensure data directories exist
+    import os
+    os.makedirs("./data", exist_ok=True)
+    os.makedirs("./logs", exist_ok=True)
+    
+    # Initialize storage
+    try:
+        from services.storage_service import storage_service
+        await storage_service.initialize()
+        logger.info("SQLite storage initialized")
+    except Exception as e:
+        logger.warning(f"Storage initialization skipped: {e}")
+    
+    # Log available LLM providers
+    try:
+        from services.llm_router import llm_router
+        logger.info(f"LLM providers: {llm_router.available_providers}")
+    except Exception as e:
+        logger.warning(f"LLM router status: {e}")
     
     yield
     
     # Shutdown
-    logger.info(f"👋 Shutting down {settings.APP_NAME}")
+    logger.info(f"Shutting down {settings.APP_NAME}")
 
 
 # Create FastAPI application
@@ -72,18 +93,18 @@ app = FastAPI(
     - Text extraction (OCR)
     - Scene understanding
     
-    ### 📝 Text Search
+    ### Text Search
     - Natural language question answering
     - Information retrieval
     - Contextual explanations
     
-    ### 🎙️ Real-time Transcription
+    ### Real-time Transcription
     - Live speech-to-text
     - Conversational AI
     - Multiple voice options
     - Automatic turn detection
     
-    ### 🔒 Security
+    ### Security
     - JWT authentication
     - End-to-end encryption
     - API key management
@@ -212,6 +233,10 @@ async def general_exception_handler(request: Request, exc: Exception):
 app.include_router(routes_auth.router)
 app.include_router(routes_search.router)
 app.include_router(routes_realtime.router)
+app.include_router(routes_deepgram_live.router, prefix="/deepgram")
+app.include_router(routes_llm.router)
+app.include_router(routes_rag.router)
+app.include_router(routes_ocr.router)
 
 
 # Root endpoint
@@ -276,7 +301,7 @@ if __name__ == "__main__":
             "ssl_keyfile": settings.SSL_KEYFILE,
             "ssl_certfile": settings.SSL_CERTFILE
         }
-        logger.info("🔒 SSL enabled")
+        logger.info("SSL enabled")
     
     # Run server
     uvicorn.run(

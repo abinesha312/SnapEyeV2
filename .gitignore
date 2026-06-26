@@ -107,3 +107,53 @@ Desktop.ini
 test_images/
 uploads/
 
+# SnapEye Sensitive Data & Credentials
+# Session & Authentication
+session.json
+**/session.json
+*.session
+
+# AI Models & API Keys
+ai_models.json
+**/ai_models.json
+
+# User Configurations (may contain API keys)
+config.yaml
+**/config.yaml
+config.yml
+**/config.yml
+
+# User Prompts & Customizations
+prompts.json
+**/prompts.json
+
+# Conversation History (may contain sensitive data)
+conversations/
+**/conversations/
+conversation_history/
+**/conversation_history/
+
+# Backend Logs (may contain API responses)
+backend/logs/
+backend/*.log
+
+# User Data Directory
+%APPDATA%/SnapEye/
+
+# Deepgram API Keys
+.deepgram
+**/deepgram_api_key.txt
+
+# Test files
+test_*.py
+**/test_*.py
+
+# Local configuration overrides
+*.local.json
+*.local.yaml
+*.local.yml
+
+# Cursor/IDE specific
+.cursor/
+.claude/
+
