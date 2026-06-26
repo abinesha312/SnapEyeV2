@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -31,7 +32,7 @@ namespace SnapEye.Config
         public static string DeepgramModel { get; set; } = "nova-3";
         public static string DeepgramLanguage { get; set; } = "en";
         public static double PauseThreshold { get; set; } = 0.5;
-        public static int EndpointingMs { get; set; } = 500;
+        public static int EndpointingMs { get; set; } = 300;
 
         // === UI ===
         public static int WindowWidth { get; set; } = 380;
@@ -56,6 +57,13 @@ namespace SnapEye.Config
 
         // === Modes ===
         public static List<ModeConfig> Modes { get; set; } = new();
+
+        /// <summary>
+        /// Snapshot of the mode list as loaded from config.yaml (or built-in fallbacks),
+        /// captured BEFORE any user overrides from prompts.json are applied. Used by the
+        /// Prompts editor to offer "Reset to default" on individual modes.
+        /// </summary>
+        public static List<ModeConfig> DefaultModes { get; private set; } = new();
 
         // === Quick Actions ===
         public static List<QuickActionConfig> QuickActions { get; set; } = new();
@@ -86,7 +94,52 @@ namespace SnapEye.Config
             LoadDefaultModes();
             LoadDefaultQuickActions();
 
+            // Snapshot the built-in defaults BEFORE applying user overrides so the Prompts
+            // editor can offer a per-mode "Reset to default" feature later.
+            DefaultModes = Modes.Select(m => m.Clone()).ToList();
+
+            // Overlay the user's customizations (if any) from %APPDATA%\SnapEye\prompts.json.
+            // On first run this also seeds the user file with the defaults so editing is easy.
+            RefreshModesFromUserFile();
+
             Console.WriteLine($"[Config] Loaded: backend={BackendHttpUrl}, model={DeepgramModel}, modes={Modes.Count}, actions={QuickActions.Count}");
+        }
+
+        /// <summary>
+        /// Reloads <see cref="Modes"/> from the user's <c>prompts.json</c>. Safe to call at any
+        /// time (e.g. when the overlay opens after the user edited prompts in the Dashboard).
+        /// Falls back to <see cref="DefaultModes"/> if the user has somehow emptied the file.
+        /// </summary>
+        public static void RefreshModesFromUserFile()
+        {
+            try
+            {
+                var loaded = Services.PromptsService.Load();
+                if (loaded == null || loaded.Count == 0)
+                {
+                    // Guarantee the overlay always has at least one usable mode so the dropdown
+                    // is never empty. Seeding uses the built-in defaults snapshot.
+                    loaded = DefaultModes.Select(m => m.Clone()).ToList();
+                    if (loaded.Count == 0)
+                    {
+                        loaded.Add(new ModeConfig
+                        {
+                            Id = "general-assistant",
+                            Name = "General Assistant",
+                            Icon = "brain",
+                            SystemPrompt = "You are SnapEye, a helpful AI meeting assistant.",
+                            Order = 0,
+                        });
+                    }
+                    Services.PromptsService.Save(loaded);
+                }
+
+                Modes = loaded.OrderBy(m => m.Order).ToList();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Config] RefreshModesFromUserFile failed: {ex.Message}");
+            }
         }
 
         private static void LoadFromYaml()
@@ -167,15 +220,19 @@ namespace SnapEye.Config
             if (config.TryGetValue("modes", out var modesObj) && modesObj is List<object> modesList)
             {
                 Modes.Clear();
+                int order = 0;
                 foreach (var item in modesList)
                 {
                     if (item is Dictionary<object, object> modeDict)
                     {
+                        string name = GetString(modeDict, "name", "Unnamed");
                         Modes.Add(new ModeConfig
                         {
-                            Name = GetString(modeDict, "name", "Unnamed"),
+                            Id = GetString(modeDict, "id", SlugifyForId(name)),
+                            Name = name,
                             Icon = GetString(modeDict, "icon", "brain"),
                             SystemPrompt = GetString(modeDict, "system_prompt", ""),
+                            Order = order++,
                         });
                     }
                 }
@@ -215,11 +272,28 @@ namespace SnapEye.Config
             if (Modes.Count > 0) return;
             Modes.AddRange(new[]
             {
-                new ModeConfig { Name = "General Assistant", Icon = "brain", SystemPrompt = "You are SnapEye, a helpful AI meeting assistant." },
-                new ModeConfig { Name = "Interview Mode", Icon = "briefcase", SystemPrompt = "Help the user during a job interview." },
-                new ModeConfig { Name = "Sales Mode", Icon = "chart", SystemPrompt = "Help the user during a sales call." },
-                new ModeConfig { Name = "Meeting Notes", Icon = "clipboard", SystemPrompt = "Summarize key points and action items." },
+                new ModeConfig { Id = "general-assistant", Name = "General Assistant", Icon = "brain", SystemPrompt = "You are SnapEye, a helpful AI meeting assistant.", Order = 0 },
+                new ModeConfig { Id = "interview-mode", Name = "Interview Mode", Icon = "briefcase", SystemPrompt = "Help the user during a job interview.", Order = 1 },
+                new ModeConfig { Id = "sales-mode", Name = "Sales Mode", Icon = "chart", SystemPrompt = "Help the user during a sales call.", Order = 2 },
+                new ModeConfig { Id = "meeting-notes", Name = "Meeting Notes", Icon = "clipboard", SystemPrompt = "Summarize key points and action items.", Order = 3 },
             });
+        }
+
+        /// <summary>
+        /// Converts a free-form name like "Interview Mode" into a stable slug "interview-mode".
+        /// Used as a fallback id when the yaml entry didn't specify one.
+        /// </summary>
+        private static string SlugifyForId(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return Guid.NewGuid().ToString("N");
+            var sb = new System.Text.StringBuilder(name.Length);
+            foreach (char c in name.ToLowerInvariant())
+            {
+                if (char.IsLetterOrDigit(c)) sb.Append(c);
+                else if (c == ' ' || c == '-' || c == '_') sb.Append('-');
+            }
+            string slug = sb.ToString().Trim('-');
+            return string.IsNullOrEmpty(slug) ? Guid.NewGuid().ToString("N") : slug;
         }
 
         private static void LoadDefaultQuickActions()
@@ -312,9 +386,25 @@ namespace SnapEye.Config
     /// <summary>Configuration for an AI mode (Interview, Sales, etc.)</summary>
     public class ModeConfig
     {
+        /// <summary>
+        /// Stable identifier for the mode. Used to match user overrides back to built-in defaults
+        /// across renames. Auto-generated if missing.
+        /// </summary>
+        public string Id { get; set; } = "";
         public string Name { get; set; } = "";
         public string Icon { get; set; } = "brain";
         public string SystemPrompt { get; set; } = "";
+        /// <summary>Display order in the mode selector dropdown. Lower values render first.</summary>
+        public int Order { get; set; }
+
+        public ModeConfig Clone() => new ModeConfig
+        {
+            Id = this.Id,
+            Name = this.Name,
+            Icon = this.Icon,
+            SystemPrompt = this.SystemPrompt,
+            Order = this.Order,
+        };
     }
 
     /// <summary>Configuration for a quick action button</summary>

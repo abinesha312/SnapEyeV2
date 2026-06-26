@@ -50,10 +50,10 @@
             <Setter Property="Padding" Value="0"/>
         </Style>
         
-        <!-- Thin Scrollbar -->
+        <!-- Enhanced Scrollbar with better visibility -->
         <Style x:Key="ContentScrollbar" TargetType="ScrollBar">
             <Setter Property="Background" Value="Transparent"/>
-            <Setter Property="Width" Value="4"/>
+            <Setter Property="Width" Value="8"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="ScrollBar">
@@ -63,17 +63,20 @@
                                     <Thumb>
                                         <Thumb.Style>
                                             <Style TargetType="Thumb">
-                                                <Setter Property="Background" Value="#25FFFFFF"/>
+                                                <Setter Property="Background" Value="#60FFFFFF"/>
                                                 <Setter Property="Template">
                                                     <Setter.Value>
                                                         <ControlTemplate TargetType="Thumb">
-                                                            <Border Background="{TemplateBinding Background}" CornerRadius="2"/>
+                                                            <Border Background="{TemplateBinding Background}" CornerRadius="4"/>
                                                         </ControlTemplate>
                                                     </Setter.Value>
                                                 </Setter>
                                                 <Style.Triggers>
                                                     <Trigger Property="IsMouseOver" Value="True">
                                                         <Setter Property="Background" Value="#2563EB"/>
+                                                    </Trigger>
+                                                    <Trigger Property="IsDragging" Value="True">
+                                                        <Setter Property="Background" Value="#1D4ED8"/>
                                                     </Trigger>
                                                 </Style.Triggers>
                                             </Style>
@@ -88,13 +91,16 @@
         </Style>
     </UserControl.Resources>
     
-    <Grid x:Name="ContentGrid" Background="#27272A">
+    <Grid x:Name="ContentGrid" Background="Transparent">
         <!-- Chat / AI Insights View (running Q&A thread) -->
-        <Grid x:Name="ChatViewRoot" Background="#27272A" Visibility="Visible">
+        <Grid x:Name="ChatViewRoot" Background="Transparent" Visibility="Visible">
             <ScrollViewer x:Name="ChatView"
-                          Background="#27272A"
+                          Background="Transparent"
                           VerticalScrollBarVisibility="Auto"
                           HorizontalScrollBarVisibility="Disabled"
+                          PanningMode="VerticalOnly"
+                          CanContentScroll="False"
+                          PreviewMouseWheel="OuterScrollViewer_PreviewMouseWheel"
                           Padding="12,10,12,14">
                 <ScrollViewer.Resources>
                     <Style TargetType="ScrollBar" BasedOn="{StaticResource ContentScrollbar}"/>
@@ -147,9 +153,12 @@
         
         <!-- Transcription View -->
         <ScrollViewer x:Name="TranscriptionView"
-                      Background="#27272A"
+                      Background="Transparent"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled"
+                      PanningMode="VerticalOnly"
+                      CanContentScroll="False"
+                      PreviewMouseWheel="OuterScrollViewer_PreviewMouseWheel"
                       Visibility="Collapsed"
                       Padding="10,4">
             <ScrollViewer.Resources>

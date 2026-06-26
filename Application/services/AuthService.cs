@@ -2,6 +2,7 @@ using System;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace SnapEye.Services
@@ -10,7 +11,7 @@ namespace SnapEye.Services
     /// Authentication service for SnapEye backend API
     /// Handles login and token management
     /// </summary>
-    public class AuthService
+    public class AuthService : IDisposable
     {
         private readonly HttpClient httpClient;
         private readonly string baseUrl;
@@ -60,16 +61,16 @@ namespace SnapEye.Services
                 string jsonContent = JsonSerializer.Serialize(loginData);
                 var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
-                var response = await httpClient.PostAsync("/auth/login", content);
+                var response = await httpClient.PostAsync("/auth/login", content).ConfigureAwait(false);
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    string errorContent = await response.Content.ReadAsStringAsync();
+                    string errorContent = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                     ErrorOccurred?.Invoke(this, $"Login failed: {response.StatusCode} - {errorContent}");
                     return false;
                 }
 
-                string responseContent = await response.Content.ReadAsStringAsync();
+                string responseContent = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                 using var doc = JsonDocument.Parse(responseContent);
                 var root = doc.RootElement;
 
@@ -118,7 +119,7 @@ namespace SnapEye.Services
                 var request = new HttpRequestMessage(HttpMethod.Post, "/auth/verify");
                 request.Headers.Add("Authorization", $"Bearer {accessToken}");
 
-                var response = await httpClient.SendAsync(request);
+                var response = await httpClient.SendAsync(request).ConfigureAwait(false);
                 return response.IsSuccessStatusCode;
             }
             catch
@@ -146,16 +147,16 @@ namespace SnapEye.Services
                 var request = new HttpRequestMessage(HttpMethod.Post, "/auth/refresh");
                 request.Headers.Add("Authorization", $"Bearer {tokenToUse}");
 
-                var response = await httpClient.SendAsync(request);
+                var response = await httpClient.SendAsync(request).ConfigureAwait(false);
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    string errorContent = await response.Content.ReadAsStringAsync();
+                    string errorContent = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                     ErrorOccurred?.Invoke(this, $"Token refresh failed: {response.StatusCode}");
                     return false;
                 }
 
-                string responseContent = await response.Content.ReadAsStringAsync();
+                string responseContent = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                 using var doc = JsonDocument.Parse(responseContent);
                 var root = doc.RootElement;
 
@@ -196,7 +197,7 @@ namespace SnapEye.Services
                 {
                     var request = new HttpRequestMessage(HttpMethod.Post, "/auth/logout");
                     request.Headers.Add("Authorization", $"Bearer {accessToken}");
-                    await httpClient.SendAsync(request);
+                    await httpClient.SendAsync(request).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -215,6 +216,34 @@ namespace SnapEye.Services
         public string? GetAuthorizationHeader()
         {
             return !string.IsNullOrEmpty(accessToken) ? $"Bearer {accessToken}" : null;
+        }
+
+        /// <summary>
+        /// Cheap reachability probe with a hard timeout. Used before kicking off the
+        /// transcription WebSocket / long-running streams so the user gets a fast inline
+        /// error ("Backend not reachable") instead of staring at a frozen UI for the
+        /// full HttpClient.Timeout while a dead host is being awaited.
+        /// </summary>
+        public async Task<bool> IsBackendReachableAsync(int timeoutMs = 1500)
+        {
+            using var cts = new CancellationTokenSource(timeoutMs);
+            try
+            {
+                // /health is a public endpoint that doesn't require auth. If a
+                // deployment doesn't have it, any 4xx (e.g. 404) still proves the
+                // server is up; only network failures / timeouts mean unreachable.
+                var response = await httpClient.GetAsync("/health", cts.Token).ConfigureAwait(false);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public void Dispose()
+        {
+            try { httpClient?.Dispose(); } catch { /* ignore */ }
         }
     }
 }

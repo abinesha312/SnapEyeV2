@@ -57,6 +57,10 @@ namespace SnapEye.Services
                 return;
             }
 
+            // Defensive: if a previous capture session was stopped without being fully
+            // torn down, dispose the stale device/capture here before creating new ones.
+            Cleanup();
+
             try
             {
                 // Get the default audio render device (speakers)
@@ -93,25 +97,34 @@ namespace SnapEye.Services
         }
 
         /// <summary>
-        /// Stop capturing system audio
+        /// Stop capturing system audio and release the underlying device.
+        /// Safe to call multiple times.
         /// </summary>
         public void StopCapture()
         {
-            if (!isCapturing)
-            {
+            if (!isCapturing && speakerCapture == null)
                 return;
-            }
 
             try
             {
-                speakerCapture?.StopRecording();
-                isCapturing = false;
+                // Unsubscribe first to prevent late callbacks after we null the capture.
+                if (speakerCapture != null)
+                {
+                    speakerCapture.DataAvailable -= OnSpeakerDataAvailable;
+                    speakerCapture.RecordingStopped -= OnRecordingStopped;
+                    try { speakerCapture.StopRecording(); } catch { /* already stopped */ }
+                }
                 LogInfo("Speaker capture stopped");
             }
             catch (Exception ex)
             {
                 LogError($"Error stopping capture: {ex.Message}");
                 ErrorOccurred?.Invoke(this, $"Failed to stop speaker capture: {ex.Message}");
+            }
+            finally
+            {
+                isCapturing = false;
+                Cleanup();
             }
         }
 
@@ -164,27 +177,26 @@ namespace SnapEye.Services
         }
 
         /// <summary>
-        /// Convert IEEE float audio to 16-bit PCM
-        /// WASAPI loopback typically returns float audio
+        /// Convert IEEE float audio to 16-bit PCM (little-endian).
+        /// WASAPI loopback typically returns float audio. This runs on every audio callback
+        /// (~every 10ms), so the inner loop is allocation-free — no per-sample <c>BitConverter</c>.
         /// </summary>
-        private byte[] ConvertFloatToPcm16(byte[] floatData, int bytesRecorded, WaveFormat sourceFormat)
+        private static byte[] ConvertFloatToPcm16(byte[] floatData, int bytesRecorded, WaveFormat sourceFormat)
         {
-            int sampleCount = bytesRecorded / 4; // 4 bytes per float sample
-            byte[] pcmData = new byte[sampleCount * 2]; // 2 bytes per PCM16 sample
+            int sampleCount = bytesRecorded / 4;
+            byte[] pcmData = new byte[sampleCount * 2];
 
             for (int i = 0; i < sampleCount; i++)
             {
                 float sample = BitConverter.ToSingle(floatData, i * 4);
 
-                // Clamp to valid range
-                sample = Math.Max(-1.0f, Math.Min(1.0f, sample));
+                if (sample > 1.0f) sample = 1.0f;
+                else if (sample < -1.0f) sample = -1.0f;
 
-                // Convert to 16-bit PCM
-                short pcmSample = (short)(sample * 32767);
-
-                byte[] pcmBytes = BitConverter.GetBytes(pcmSample);
-                pcmData[i * 2] = pcmBytes[0];
-                pcmData[i * 2 + 1] = pcmBytes[1];
+                short pcmSample = (short)(sample * 32767f);
+                int o = i * 2;
+                pcmData[o]     = (byte)(pcmSample & 0xFF);
+                pcmData[o + 1] = (byte)((pcmSample >> 8) & 0xFF);
             }
 
             return pcmData;

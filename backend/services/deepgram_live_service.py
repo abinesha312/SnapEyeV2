@@ -43,7 +43,7 @@ class DeepgramLiveTranscriptionService:
         api_key: Optional[str] = None,
         model: str = settings.DEEPGRAM_MODEL,
         language: str = settings.DEEPGRAM_LANGUAGE,
-        endpointing_ms: int = 500,  # Endpointing threshold in milliseconds
+        endpointing_ms: int = 300,  # Endpointing threshold in milliseconds
         vad_events: bool = True,  # Voice Activity Detection events
     ):
         """
@@ -53,7 +53,7 @@ class DeepgramLiveTranscriptionService:
             api_key: Deepgram API key (uses settings default if None)
             model: Deepgram model (nova-3 recommended)
             language: Language code (en, es, fr, etc.)
-            endpointing_ms: Milliseconds of silence to trigger endpoint (default: 500ms)
+            endpointing_ms: Milliseconds of silence to trigger endpoint (default: 300ms)
             vad_events: Enable Voice Activity Detection events
         """
         self.api_key = api_key or settings.DEEPGRAM_API_KEY
@@ -85,16 +85,19 @@ class DeepgramLiveTranscriptionService:
         self.messages: List[AudioMessage] = []
         self.current_message: Optional[AudioMessage] = None
         self.message_counter = 0
+        # Finalized segments of the current message. Interim results are cumulative
+        # per segment, so the displayed text is always: finals + latest interim.
+        self.current_final_parts: List[str] = []
         
         # Source tracking
         self.current_source: Optional[str] = None
         self.previous_source: Optional[str] = None
         
-        # Audio buffering for small chunks (200-300ms)
+        # Audio buffering for small chunks (100ms)
         self.audio_buffer: bytes = b''
-        self.buffer_size_ms = 300  # Buffer up to 300ms before sending
+        self.buffer_size_ms = 100  # Buffer up to 100ms before sending
         self.last_send_time: Optional[float] = None
-        self.min_chunk_size = int(24000 * 2 * 0.1)  # 100ms minimum (24kHz * 2 bytes * 0.1s)
+        self.min_chunk_size = int(24000 * 2 * 0.05)  # 50ms minimum (24kHz * 2 bytes * 0.05s)
         
         # Endpointing state
         self.last_audio_time: Optional[float] = None
@@ -103,6 +106,7 @@ class DeepgramLiveTranscriptionService:
         # Async tasks
         self.receive_task: Optional[asyncio.Task] = None
         self.buffer_flush_task: Optional[asyncio.Task] = None
+        self.ai_task: Optional[asyncio.Task] = None
         
         logger.info(f"Initialized DeepgramLiveTranscriptionService (model: {model}, endpointing: {endpointing_ms}ms)")
     
@@ -140,6 +144,13 @@ class DeepgramLiveTranscriptionService:
                 encoding="linear16",
                 sample_rate=24000,
                 channels=1,
+                # Low-latency endpointing: speech_final fires after endpointing_ms of
+                # silence; UtteranceEnd needs utterance_end_ms (min 1000) to be emitted.
+                endpointing=self.endpointing_ms,
+                utterance_end_ms=max(1000, self.endpointing_ms),
+                vad_events=self.vad_events,
+                smart_format=settings.DEEPGRAM_SMART_FORMAT,
+                punctuate=settings.DEEPGRAM_PUNCTUATE,
             )
             
             self.ws_client = self.ws_connection.__enter__()
@@ -357,6 +368,7 @@ class DeepgramLiveTranscriptionService:
                 return
             
             is_final = data.get("is_final", False)
+            speech_final = data.get("speech_final", False)
             confidence = alternative.get("confidence", 0.0)
             
             # Check for source change
@@ -385,33 +397,34 @@ class DeepgramLiveTranscriptionService:
                 )
                 self.messages.append(self.current_message)
                 self.previous_source = self.current_source
-                
+                self.current_final_parts = []
+
                 logger.info(f"Created message {self.current_message.message_id} (source: {self.current_source})")
-            
-            # Add transcript to current message
+
+            # Build message text without duplicating words:
+            # Deepgram interim results are CUMULATIVE for the in-progress segment,
+            # so an interim must REPLACE the pending part (never be appended).
+            # Each final covers only its own segment, so finals accumulate once each.
+            if is_final:
+                self.current_final_parts.append(transcript)
+                display_text = " ".join(self.current_final_parts)
+            else:
+                display_text = " ".join(self.current_final_parts + [transcript])
+
             if self.current_message:
-                if is_final:
-                    # Final transcript replaces interim
-                    self.current_message.set_transcript(transcript)
-                else:
-                    # Interim transcript accumulates
-                    self.current_message.add_transcript(transcript)
-            
+                self.current_message.set_transcript(display_text)
+
             # Determine if this is a new segment (for UI updates)
-            is_new_segment = (
-                self.current_message and 
-                len(self.current_message.transcript_parts) == 1 and
-                is_final
-            )
-            
+            is_new_segment = is_final and len(self.current_final_parts) == 1
+
             status = "FINAL" if is_final else "INTERIM"
             logger.debug(f"[{status}] {transcript[:50]}... (source={self.current_source}, conf={confidence:.2f})")
-            
-            # Send to callback
+
+            # Send to callback (full message text so the UI can render it directly)
             if self.on_transcript_callback:
                 await self.on_transcript_callback({
                     "type": "transcript.updated" if not is_final else "transcript.final",
-                    "transcript": transcript,
+                    "transcript": display_text,
                     "is_final": is_final,
                     "is_new_segment": is_new_segment,
                     "source": self.current_source or "microphone",
@@ -430,10 +443,21 @@ class DeepgramLiveTranscriptionService:
                     message_id=str(self.current_message.message_id) if self.current_message else "",
                 )
             
-            # Run keyword/question detection on final segments
+            # Run keyword/question detection on final segments.
+            # Runs as a background task so streaming the AI answer never blocks
+            # the Deepgram receive loop (keeps transcripts real-time). Skipped if
+            # a previous AI answer is still streaming to avoid interleaved output.
             if is_final and self._ai_pipeline_enabled and self._keyword_detector:
-                await self._run_detection_pipeline(transcript)
-                
+                if self.ai_task is None or self.ai_task.done():
+                    self.ai_task = asyncio.create_task(self._run_detection_pipeline(transcript))
+                else:
+                    logger.debug("AI pipeline busy, skipping trigger for this segment")
+
+            # Deepgram sets speech_final once endpointing silence is reached:
+            # finalize the message so the next speech starts a fresh one.
+            if speech_final:
+                await self._handle_endpoint()
+
         except Exception as e:
             logger.exception(f"Transcript handling error: {e}")
     
@@ -445,20 +469,23 @@ class DeepgramLiveTranscriptionService:
         try:
             if self.current_message:
                 self.current_message.is_final = True
+                finalized = self.current_message.to_dict()
                 logger.info(f"Endpointed message {self.current_message.message_id}")
-                
+
+                # Reset for next message BEFORE notifying, so a callback failure
+                # can never leak the old message into the next utterance
+                self.current_message = None
+                self.current_final_parts = []
+
                 # Notify callback
                 if self.on_transcript_callback:
                     await self.on_transcript_callback({
                         "type": "message.finalized",
-                        "message": self.current_message.to_dict(),
+                        "message": finalized,
                         "total_messages": len(self.messages),
                         "reason": "endpointing"
                     })
-                
-                # Reset for next message (will be created on next transcript)
-                self.current_message = None
-                
+
         except Exception as e:
             logger.exception(f"Endpoint handling error: {e}")
     
@@ -494,11 +521,16 @@ class DeepgramLiveTranscriptionService:
             
             logger.info(f"AI question to answer: '{question}'")
             
-            # Search RAG for relevant context
+            # Search RAG for relevant context (with timeout to avoid blocking LLM start)
             rag_chunks = []
             try:
                 from services.rag_service import rag_service
-                rag_chunks = await rag_service.search(question, top_k=3)
+                rag_chunks = await asyncio.wait_for(
+                    rag_service.search(question, top_k=3),
+                    timeout=0.5
+                )
+            except asyncio.TimeoutError:
+                logger.debug("RAG search timed out (>500ms), skipping for latency")
             except Exception as e:
                 logger.debug(f"RAG search skipped: {e}")
             
@@ -541,7 +573,7 @@ class DeepgramLiveTranscriptionService:
                     async for token in llm_router.generate_stream(
                         messages,
                         system_prompt=context["system_prompt"],
-                        max_tokens=2048,
+                        max_tokens=700,
                         temperature=0.7,
                     ):
                         await self.on_ai_suggestion_callback({
@@ -657,6 +689,7 @@ class DeepgramLiveTranscriptionService:
             
             # Reset tracking so reconnect starts fresh
             self.current_message = None
+            self.current_final_parts = []
             self.current_source = None
             self.previous_source = None
             
@@ -687,6 +720,7 @@ class DeepgramLiveTranscriptionService:
             self.current_message.is_final = True
         self.messages = []
         self.current_message = None
+        self.current_final_parts = []
         self.message_counter = 0
         self.current_source = None
         self.previous_source = None
@@ -710,7 +744,7 @@ class DeepgramSessionManager:
         api_key: Optional[str] = None,
         model: str = settings.DEEPGRAM_MODEL,
         language: str = settings.DEEPGRAM_LANGUAGE,
-        endpointing_ms: int = 500,
+        endpointing_ms: int = 300,
         vad_events: bool = True
     ) -> Optional[DeepgramLiveTranscriptionService]:
         """

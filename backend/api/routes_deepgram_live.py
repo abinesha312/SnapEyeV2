@@ -5,10 +5,10 @@ Alternate WebSocket entry for live transcription.
 backward compatibility and uses the same Deepgram session, AI pipeline, and message shape
 as `routes_realtime.audio_transcribe`.
 """
-import asyncio
 import base64
 import json
 import logging
+import uuid
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
@@ -31,7 +31,7 @@ async def live_transcribe(
     token: str = Query(..., description="JWT authentication token"),
     model: str = Query("nova-3"),
     language: str = Query(settings.DEEPGRAM_LANGUAGE),
-    endpointing_ms: int = Query(500),
+    endpointing_ms: int = Query(300),
 ):
     session_id = None
     deepgram_service = None
@@ -47,7 +47,7 @@ async def live_transcribe(
             return
 
         await websocket.accept()
-        session_id = f"{user_data.get('sub')}_{asyncio.current_task().get_name()}"
+        session_id = f"{user_data.get('sub')}_{uuid.uuid4().hex}"
 
         async def on_transcript(result):
             try:

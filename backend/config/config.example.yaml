@@ -1,5 +1,6 @@
-# SnapEye AI Backend Configuration
-# Values here are defaults; environment variables (.env) override them.
+# SnapEye AI Backend Configuration Example
+# Copy this file to config.yaml and configure your settings
+# API keys should be set via environment variables (.env file)
 
 app:
   name: "SnapEye AI"

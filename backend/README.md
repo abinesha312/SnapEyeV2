@@ -184,6 +184,12 @@ curl -X POST "http://localhost:8080/api/search/text" \
   }'
 ```
 
+### LLM streaming (SSE) and per-user isolation
+
+Interactive LLM replies (chat, Ask AI, OCR follow-ups) use **`POST /api/llm/stream`** or **`POST /api/llm/context-stream`** with **`Authorization: Bearer`**. The response is **Server-Sent Events** (`data: {"type":"token",...}`). Each authenticated request is an independent stream; users are separated by JWT identity and by **one HTTP response per conversation turn**, not by a shared WebSocket room.
+
+Live transcription uses a **separate WebSocket** (`/api/transcribe/audio` or `/api/transcribe/live`) with the token in the query string; each socket owns its own session. Optional keyword-triggered suggestions stream on that same socket as `ai.suggestion.*` messages.
+
 ### Real-time Transcription (WebSocket)
 
 ```javascript

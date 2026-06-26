@@ -23,6 +23,13 @@ namespace SnapEye.Services
         private TranscriptionConversation conversation;
         private DateTime lastAudioSent = DateTime.MinValue;
 
+        // ClientWebSocket.SendAsync is NOT safe for concurrent calls. Two audio capture
+        // services (mic + speaker) deliver buffers independently and can both call
+        // SendAudioAsync at the same instant, which would throw InvalidOperationException
+        // ("There is already one outstanding Send call for this WebSocket instance").
+        // This semaphore serializes all outbound frames.
+        private readonly System.Threading.SemaphoreSlim sendLock = new(1, 1);
+
         // Events
         public event EventHandler<TranscriptionMessage>? TranscriptionReceived;
         public event EventHandler<string>? ErrorOccurred;
@@ -69,7 +76,7 @@ namespace SnapEye.Services
         /// <param name="model">Deepgram model (default: nova-3)</param>
         /// <param name="language">Language code (default: en)</param>
         /// <param name="endpointingMs">Endpointing threshold in milliseconds (default: 500ms)</param>
-        public async Task<bool> ConnectAsync(string model = "nova-3", string language = "en", int endpointingMs = 500)
+        public async Task<bool> ConnectAsync(string model = "nova-3", string language = "en", int endpointingMs = 300)
         {
             if (isConnected)
             {
@@ -118,42 +125,42 @@ namespace SnapEye.Services
         /// </summary>
         public async Task SendAudioAsync(byte[] audioData, MessageSource source)
         {
+            // Silently drop packets when disconnected — audio capture can continue to
+            // deliver a few buffers after a disconnect starts, and we don't want to spam
+            // the UI / error log with "Not connected" for every one.
             if (!isConnected || webSocket == null || webSocket.State != WebSocketState.Open)
-            {
-                ErrorOccurred?.Invoke(this, "Not connected to transcription service");
                 return;
-            }
 
+            string audioBase64 = Convert.ToBase64String(audioData);
+            string sourceStr = source == MessageSource.Microphone ? "microphone" : "speaker";
+            var message = new { type = "audio", data = audioBase64, source = sourceStr };
+            string jsonMessage = JsonSerializer.Serialize(message);
+            byte[] messageBytes = Encoding.UTF8.GetBytes(jsonMessage);
+
+            var token = cancellationTokenSource?.Token ?? CancellationToken.None;
+            await sendLock.WaitAsync(token).ConfigureAwait(false);
             try
             {
-                // Send audio with source information as JSON
-                // Backend expects: { "type": "audio", "data": "<base64>", "source": "microphone"|"speaker" }
-                string audioBase64 = Convert.ToBase64String(audioData);
-                string sourceStr = source == MessageSource.Microphone ? "microphone" : "speaker";
-                
-                var message = new
-                {
-                    type = "audio",
-                    data = audioBase64,
-                    source = sourceStr
-                };
-
-                string jsonMessage = JsonSerializer.Serialize(message);
-                byte[] messageBytes = Encoding.UTF8.GetBytes(jsonMessage);
-
+                if (!isConnected || webSocket == null || webSocket.State != WebSocketState.Open)
+                    return;
                 await webSocket.SendAsync(
                     new ArraySegment<byte>(messageBytes),
                     WebSocketMessageType.Text,
-                    true,
-                    cancellationTokenSource?.Token ?? CancellationToken.None
-                );
-
-                // Update last audio sent time
+                    endOfMessage: true,
+                    cancellationToken: token).ConfigureAwait(false);
                 lastAudioSent = DateTime.Now;
+            }
+            catch (OperationCanceledException)
+            {
+                // Cancellation during shutdown — silent.
             }
             catch (Exception ex)
             {
                 ErrorOccurred?.Invoke(this, $"Failed to send audio: {ex.Message}");
+            }
+            finally
+            {
+                try { sendLock.Release(); } catch { /* disposed */ }
             }
         }
 
@@ -170,20 +177,30 @@ namespace SnapEye.Services
             if (ocrText.Length > 12000)
                 ocrText = ocrText.Substring(0, 12000);
 
+            var message = new { action = "set_screen_context", text = ocrText };
+            string json = JsonSerializer.Serialize(message);
+            byte[] bytes = Encoding.UTF8.GetBytes(json);
+            var token = cancellationTokenSource?.Token ?? CancellationToken.None;
+
+            await sendLock.WaitAsync(token).ConfigureAwait(false);
             try
             {
-                var message = new { action = "set_screen_context", text = ocrText };
-                string json = JsonSerializer.Serialize(message);
-                byte[] bytes = Encoding.UTF8.GetBytes(json);
+                if (!isConnected || webSocket == null || webSocket.State != WebSocketState.Open)
+                    return;
                 await webSocket.SendAsync(
                     new ArraySegment<byte>(bytes),
                     WebSocketMessageType.Text,
-                    true,
-                    cancellationTokenSource?.Token ?? CancellationToken.None);
+                    endOfMessage: true,
+                    cancellationToken: token).ConfigureAwait(false);
             }
+            catch (OperationCanceledException) { /* shutdown */ }
             catch (Exception ex)
             {
                 ErrorOccurred?.Invoke(this, $"Failed to send screen context: {ex.Message}");
+            }
+            finally
+            {
+                try { sendLock.Release(); } catch { /* disposed */ }
             }
         }
 
@@ -426,7 +443,7 @@ namespace SnapEye.Services
                 TranscriptionMessage? existingMessage = null;
                 if (!string.IsNullOrEmpty(messageId))
                 {
-                    existingMessage = conversation.Messages.Find(m => m.MessageId == messageId);
+                    existingMessage = conversation.FindByMessageId(messageId);
                 }
 
                 if (existingMessage != null)
@@ -509,7 +526,7 @@ namespace SnapEye.Services
                     // Find and finalize the message
                     if (!string.IsNullOrEmpty(messageId))
                     {
-                        var message = conversation.Messages.Find(m => m.MessageId == messageId);
+                        var message = conversation.FindByMessageId(messageId);
                         if (message != null)
                         {
                             if (!string.IsNullOrEmpty(transcript))
@@ -537,25 +554,23 @@ namespace SnapEye.Services
                 if (!root.TryGetProperty("messages", out var messagesElement))
                     return;
 
-                // Clear and reload all messages
-                conversation.Messages.Clear();
-
+                // Build the replacement list off-lock then swap atomically.
+                var rebuilt = new System.Collections.Generic.List<TranscriptionMessage>();
+                int idx = 0;
                 foreach (var msgElement in messagesElement.EnumerateArray())
                 {
-                    // Use safe TryGetProperty for each field
                     string messageId = "";
                     if (msgElement.TryGetProperty("message_id", out var idElem) && idElem.ValueKind == JsonValueKind.String)
                         messageId = idElem.GetString() ?? "";
-                    
+
                     string transcript = "";
                     if (msgElement.TryGetProperty("transcript", out var transcriptElem) && transcriptElem.ValueKind == JsonValueKind.String)
                         transcript = transcriptElem.GetString() ?? "";
-                    
+
                     bool isFinal = false;
                     if (msgElement.TryGetProperty("is_final", out var finalElem))
                         isFinal = finalElem.ValueKind == JsonValueKind.True;
 
-                    // Read source from backend instead of hardcoding
                     MessageSource source = MessageSource.Microphone;
                     if (msgElement.TryGetProperty("source", out var sourceElem) && sourceElem.ValueKind == JsonValueKind.String)
                     {
@@ -563,11 +578,19 @@ namespace SnapEye.Services
                         source = sourceStr == "speaker" ? MessageSource.Speaker : MessageSource.Microphone;
                     }
 
-                    var message = conversation.AddMessage(transcript, source);
-                    message.MessageId = messageId;
-                    message.IsFinal = isFinal;
-                    message.IsNewSegment = true;
+                    rebuilt.Add(new TranscriptionMessage
+                    {
+                        Index = idx++,
+                        MessageId = messageId,
+                        Text = transcript,
+                        Source = source,
+                        IsFinal = isFinal,
+                        IsNewSegment = true,
+                        Timestamp = DateTime.Now,
+                        SessionId = conversation.SessionId,
+                    });
                 }
+                conversation.ReplaceAll(rebuilt);
             }
             catch (Exception ex)
             {
@@ -705,23 +728,37 @@ namespace SnapEye.Services
             conversation.Clear();
         }
 
+        /// <summary>
+        /// Non-blocking dispose. The WebSocket close is fired as a 1-second background task
+        /// so the caller (typically the UI thread during window close) never stalls.
+        /// </summary>
         public void Dispose()
         {
-            // DisconnectAsync handles cleanup of webSocket and cancellationTokenSource
-            // Don't double-dispose here - just trigger the disconnect
             try
             {
                 isConnected = false;
                 cancellationTokenSource?.Cancel();
-                
-                if (webSocket != null && webSocket.State == WebSocketState.Open)
+
+                var ws = webSocket;
+                if (ws != null && ws.State == WebSocketState.Open)
                 {
-                    // Synchronous close with timeout
-                    webSocket.CloseAsync(
-                        WebSocketCloseStatus.NormalClosure,
-                        "Disposing",
-                        CancellationToken.None
-                    ).Wait(TimeSpan.FromSeconds(2));
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            using var closeCts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+                            await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", closeCts.Token)
+                                    .ConfigureAwait(false);
+                        }
+                        catch { /* ignore */ }
+                        finally { try { ws.Dispose(); } catch { } }
+                    });
+                    webSocket = null;
+                }
+                else
+                {
+                    webSocket?.Dispose();
+                    webSocket = null;
                 }
             }
             catch
@@ -730,8 +767,6 @@ namespace SnapEye.Services
             }
             finally
             {
-                webSocket?.Dispose();
-                webSocket = null;
                 cancellationTokenSource?.Dispose();
                 cancellationTokenSource = null;
             }

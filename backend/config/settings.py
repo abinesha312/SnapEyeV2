@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     DEEPGRAM_DIARIZE: bool = True
     
     # Audio Transcription Settings
-    AUDIO_CHUNK_DURATION: float = 2.0  # Process audio every 2 seconds
+    AUDIO_CHUNK_DURATION: float = 0.1  # Process audio every 100ms (matches buffer_size_ms)
     PAUSE_THRESHOLD: float = 5.0  # Create new message after 5 seconds of silence
     AUDIO_SAMPLE_RATE: int = 24000  # 24kHz
     AUDIO_CHANNELS: int = 1  # Mono
@@ -86,9 +86,23 @@ class Settings(BaseSettings):
     # Anthropic Configuration
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
-    
+
+    # Google Gemini Configuration (server-side default; per-request override supported)
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+
+    # xAI / Grok Configuration (OpenAI-compatible; per-request override supported)
+    XAI_API_KEY: str = os.getenv("XAI_API_KEY", "")
+    XAI_MODEL: str = "grok-4.20"
+    XAI_BASE_URL: str = "https://api.x.ai/v1"
+
+    # OCR Configuration
+    # Optional override for the Tesseract executable path. Leave blank to let the
+    # OCR service auto-detect common Windows install locations.
+    TESSERACT_CMD: str = os.getenv("TESSERACT_CMD", "")
+
     # LLM Router Configuration
-    LLM_PRIMARY_PROVIDER: str = "openai"  # "openai" or "anthropic"
+    LLM_PRIMARY_PROVIDER: str = "openai"  # "openai", "anthropic", "gemini", or "grok"
     LLM_FALLBACK_PROVIDER: str = "anthropic"  # fallback when primary fails
     LLM_STREAM_ENABLED: bool = True
     LLM_MAX_TOKENS: int = 4096
@@ -105,7 +119,7 @@ class Settings(BaseSettings):
     CONTEXT_SUMMARY_THRESHOLD: int = 80000  # summarize when exceeded
     
     # Keyword Detection
-    KEYWORD_DEBOUNCE_MS: int = 2000  # minimum ms between triggers
+    KEYWORD_DEBOUNCE_MS: int = 800  # minimum ms between triggers
     
     # Storage
     SQLITE_DB_PATH: str = "./data/snapeye.db"

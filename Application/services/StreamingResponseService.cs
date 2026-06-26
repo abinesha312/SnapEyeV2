@@ -64,15 +64,19 @@ namespace SnapEye.Services
                 new { role = "user", content = userMessage }
             };
 
+            var (activeProvider, activeModel, activeKey) = ResolveAiCredentials(provider);
+
             var payload = new
             {
                 messages = messages,
                 system_prompt = systemPrompt,
                 stream = true,
-                provider = provider
+                provider = activeProvider,
+                model = activeModel,
+                api_key = activeKey,
             };
 
-            await StreamFromEndpointAsync("/api/llm/stream", payload);
+            await StreamFromEndpointAsync("/api/llm/stream", payload).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -86,6 +90,8 @@ namespace SnapEye.Services
             string? systemPrompt = null,
             string? provider = null)
         {
+            var (activeProvider, activeModel, activeKey) = ResolveAiCredentials(provider);
+
             var payload = new
             {
                 question = question,
@@ -93,10 +99,36 @@ namespace SnapEye.Services
                 rag_context = ragContext,
                 screen_context = screenContext,
                 system_prompt = systemPrompt,
-                provider = provider
+                provider = activeProvider,
+                model = activeModel,
+                api_key = activeKey,
             };
 
-            await StreamFromEndpointAsync("/api/llm/context-stream", payload);
+            await StreamFromEndpointAsync("/api/llm/context-stream", payload).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Reads the user's AI Models selection (provider + model + DPAPI-decrypted key) from
+        /// <see cref="AiModelsService"/>. An explicit <paramref name="forcedProvider"/> wins
+        /// over the stored one; any field the user hasn't configured is returned as null so
+        /// the backend can fall back to its own env-var defaults.
+        /// </summary>
+        private static (string? provider, string? model, string? apiKey) ResolveAiCredentials(string? forcedProvider)
+        {
+            string? provider = forcedProvider ?? AiModelsService.GetActiveProvider();
+            string? model = AiModelsService.GetActiveModel();
+            string? apiKey = AiModelsService.GetActiveApiKeyDecrypted();
+
+            // If the caller forced a provider the user hasn't configured, still send the provider
+            // name so the backend can use its server-side key; just don't send someone else's key.
+            if (!string.IsNullOrEmpty(forcedProvider)
+                && !string.Equals(forcedProvider, AiModelsService.GetActiveProvider(), StringComparison.OrdinalIgnoreCase))
+            {
+                model = null;
+                apiKey = null;
+            }
+
+            return (provider, model, apiKey);
         }
 
         /// <summary>
@@ -107,7 +139,7 @@ namespace SnapEye.Services
             if (IsStreaming)
             {
                 CancelCurrentStream();
-                await Task.Delay(100); // Brief delay for cleanup
+                await Task.Delay(100).ConfigureAwait(false); // Brief delay for cleanup
             }
 
             currentCts = new CancellationTokenSource();
@@ -116,7 +148,10 @@ namespace SnapEye.Services
 
             try
             {
-                string json = JsonSerializer.Serialize(payload);
+                // Serialize the payload off the UI thread. Context payloads include the
+                // full transcript + screen-OCR text and can be 100s of KB; JsonSerializer
+                // on that-sized object can stall the dispatcher for noticeable time.
+                string json = await Task.Run(() => JsonSerializer.Serialize(payload), ct).ConfigureAwait(false);
                 var content = new StringContent(json, Encoding.UTF8, "application/json");
 
                 var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
@@ -128,31 +163,32 @@ namespace SnapEye.Services
                     request,
                     HttpCompletionOption.ResponseHeadersRead,
                     ct
-                );
+                ).ConfigureAwait(false);
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    string error = await response.Content.ReadAsStringAsync(ct);
+                    string error = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
                     ErrorOccurred?.Invoke(this, $"LLM request failed ({response.StatusCode}): {error}");
                     return;
                 }
 
-                using var stream = await response.Content.ReadAsStreamAsync(ct);
+                using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
                 using var reader = new StreamReader(stream);
 
-                string fullResponse = "";
+                var fullResponseBuilder = new StringBuilder(1024);
+                bool endEventSent = false;
 
                 while (!reader.EndOfStream && !ct.IsCancellationRequested)
                 {
-                    string? line = await reader.ReadLineAsync(ct);
+                    string? line = await reader.ReadLineAsync(ct).ConfigureAwait(false);
 
                     if (string.IsNullOrEmpty(line))
                         continue;
 
-                    if (!line.StartsWith("data: "))
+                    if (!line.StartsWith("data: ", StringComparison.Ordinal))
                         continue;
 
-                    string data = line.Substring(6); // Remove "data: " prefix
+                    string data = line.Substring(6);
 
                     try
                     {
@@ -174,38 +210,50 @@ namespace SnapEye.Services
                                 if (root.TryGetProperty("token", out var tokenElement))
                                 {
                                     string token = tokenElement.GetString() ?? "";
-                                    fullResponse += token;
-                                    TokenReceived?.Invoke(this, token);
+                                    if (token.Length > 0)
+                                    {
+                                        fullResponseBuilder.Append(token);
+                                        TokenReceived?.Invoke(this, token);
+                                    }
                                 }
                                 break;
 
                             case "end":
-                                if (root.TryGetProperty("full_response", out var fullRespElement))
                                 {
-                                    fullResponse = fullRespElement.GetString() ?? fullResponse;
+                                    string full;
+                                    if (root.TryGetProperty("full_response", out var fullRespElement))
+                                        full = fullRespElement.GetString() ?? fullResponseBuilder.ToString();
+                                    else
+                                        full = fullResponseBuilder.ToString();
+                                    endEventSent = true;
+                                    ResponseComplete?.Invoke(this, full);
                                 }
-                                ResponseComplete?.Invoke(this, fullResponse);
                                 break;
 
                             case "error":
                                 string errorMsg = "Unknown error";
                                 if (root.TryGetProperty("error", out var errorElement))
-                                {
                                     errorMsg = errorElement.GetString() ?? errorMsg;
-                                }
                                 ErrorOccurred?.Invoke(this, errorMsg);
                                 break;
                         }
                     }
                     catch (JsonException)
                     {
-                        // Skip malformed SSE data
+                        // Skip malformed SSE data — happens occasionally when a frame is split mid-JSON.
                     }
                 }
+
+                // Fire a completion event on any clean exit that didn't already get one
+                // (network close without "end" frame, or cancellation) so the UI clears its
+                // streaming state instead of getting stuck with a half-rendered card.
+                if (!endEventSent)
+                    ResponseComplete?.Invoke(this, fullResponseBuilder.ToString());
             }
             catch (OperationCanceledException)
             {
-                // Stream was cancelled
+                // User cancelled — still notify so UI resets.
+                ResponseComplete?.Invoke(this, "");
             }
             catch (Exception ex)
             {

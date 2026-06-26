@@ -93,9 +93,23 @@ POST /api/decrypt        # Decrypt encrypted results
 ### Real-time Transcription
 
 ```bash
-WS /api/transcribe/live  # WebSocket for live audio
+WS /api/transcribe/audio   # WebSocket: live audio (primary desktop path)
+WS /api/transcribe/live    # Alternate WebSocket entry
 GET /api/transcribe/sessions
 ```
+
+### LLM (chat / Ask AI)
+
+```bash
+POST /api/llm/stream         # Streaming reply (Server-Sent Events)
+POST /api/llm/context-stream # Context-aware stream (SSE)
+```
+
+## Real-time responses & per-user isolation
+
+- **Chat and overlay LLM** use **HTTP POST** with **SSE** (`text/event-stream`): send `Authorization: Bearer <JWT>`. Each request runs its own stream on the server; there is no shared “room” and tokens are not broadcast to other users.
+- **Live transcription** uses a **WebSocket** with the JWT in the **query string** (e.g. `?token=...`). Each connection gets its own Deepgram session and context state.
+- **Optional auto AI suggestions** during live listen stream tokens on the **same** transcription WebSocket as JSON messages (`ai.suggestion.start` / `ai.suggestion.token` / `ai.suggestion.end`), still scoped to that connection only.
 
 ## 🏗️ Architecture Highlights
 

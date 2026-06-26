@@ -16,6 +16,11 @@ namespace SnapEye
                 // Load configuration
                 Config.AppConfig.LoadConfiguration();
 
+                // Standalone mode: start (or reuse) the backend automatically so the
+                // app needs no external launcher or watchdog. Runs in the background;
+                // the UI shows immediately and services connect once it's healthy.
+                _ = BackendProcessService.EnsureBackendAsync();
+
                 // Check if valid session exists
                 SessionManager.SessionData? session = SessionManager.LoadSession();
 
@@ -56,6 +61,14 @@ namespace SnapEye
         {
             Dashboard.Dashboard dashboard = new Dashboard.Dashboard();
             dashboard.Show();
+        }
+
+        /// <summary>
+        /// Application exit - shut down the backend we spawned (external backends untouched)
+        /// </summary>
+        private void Application_Exit(object sender, ExitEventArgs e)
+        {
+            BackendProcessService.Stop();
         }
     }
 }

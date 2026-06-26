@@ -14,16 +14,24 @@ namespace SnapEye.Services
     /// Generates a short one-line title/summary for a conversation session using the
     /// backend LLM endpoint with stream=false. Falls back to a local heuristic on failure.
     /// </summary>
-    public class ConversationTitleService
+    public class ConversationTitleService : IDisposable
     {
         private readonly HttpClient http;
         private readonly string backendUrl;
         private string? authToken;
+        private bool disposed;
 
         public ConversationTitleService(string backendHttpUrl)
         {
             backendUrl = backendHttpUrl.TrimEnd('/');
             http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        }
+
+        public void Dispose()
+        {
+            if (disposed) return;
+            disposed = true;
+            try { http.Dispose(); } catch { /* ignore */ }
         }
 
         public void SetAuthToken(string token) => authToken = token;

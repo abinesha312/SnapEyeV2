@@ -4,8 +4,8 @@ Real-time WebSocket streaming with endpointing and interim results
 """
 import json
 import logging
-import asyncio
 import base64
+import uuid
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import JSONResponse
 
@@ -34,7 +34,7 @@ async def audio_transcribe(
     token: str = Query(..., description="JWT authentication token"),
     model: str = Query("nova-3", description="Deepgram model (nova-3, nova-2, nova, base, enhanced)"),
     language: str = Query(settings.DEEPGRAM_LANGUAGE, description="Language code (en, es, fr, etc.)"),
-    endpointing_ms: int = Query(500, description="Endpointing threshold in milliseconds (default: 500ms)")
+    endpointing_ms: int = Query(300, description="Endpointing threshold in milliseconds (default: 300ms)")
 ):
     """
     Real-time Audio-to-Text transcription WebSocket endpoint using Deepgram Live Streaming API
@@ -131,7 +131,7 @@ async def audio_transcribe(
         
         # Accept WebSocket connection
         await websocket.accept()
-        session_id = f"{user_data.get('sub')}_{asyncio.current_task().get_name()}"
+        session_id = f"{user_data.get('sub')}_{uuid.uuid4().hex}"
         
         # Callbacks for transcript updates
         async def on_transcript(result):
