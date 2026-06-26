@@ -1,67 +1,49 @@
-# 👁️ SnapEye AI
+# 👁️ SnapEye AI - Real-time Vision & Transcription Platform
 
-**Enterprise-grade AI-powered vision and transcription platform**
+**Enterprise-grade AI-powered meeting assistant with live transcription, screen capture OCR, and contextual AI suggestions.**
 
-Seamlessly integrate image analysis, text search, and real-time audio transcription into your applications with a beautiful WPF frontend and powerful FastAPI backend.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![.NET](https://img.shields.io/badge/.NET-8.0-512BD4)](https://dotnet.microsoft.com/)
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.109.0-009688)](https://fastapi.tiangolo.com/)
 
 ---
 
 ## 🌟 Features
 
-### Frontend (WPF Application)
+### 🎙️ Real-time Transcription
+- **Deepgram Live API** (Nova-3 model) for ultra-low latency transcription
+- Dual audio source tracking (microphone + speaker/system audio)
+- 300ms endpointing for natural conversation segmentation
+- Voice Activity Detection (VAD) for accurate speech boundaries
+- Automatic punctuation and smart formatting
 
-- **🎨 Modern UI**: Beautiful overlay interface with opacity control
-- **📷 Camera Integration**: Capture and analyze images in real-time
-- **🎙️ Listen Mode**: Real-time audio transcription
-- **📊 Alpha Region**: Markdown-rendered AI responses
-- **🎯 Draggable Overlay**: Always-on-top, transparent window
-- **🎛️ Opacity Control**: Adjust transparency with slider
+### 🖼️ Screen Capture & OCR
+- Instant screen capture with OCR text extraction
+- Contextual AI suggestions based on on-screen content
+- Tesseract OCR integration for text recognition
+- Automatic context injection into AI conversations
 
-### Backend (FastAPI)
+### 🤖 AI-Powered Intelligence
+- **Multi-provider support**: OpenAI GPT-4o, Anthropic Claude
+- Streaming responses for real-time feedback
+- RAG (Retrieval-Augmented Generation) with ChromaDB
+- Customizable AI modes (Interview, Sales, Meeting Notes, etc.)
+- Quick actions for common tasks
 
-- **🖼️ Image Analysis**: GPT-4 Vision powered image understanding
-- **📝 Text Search**: Natural language question answering
-- **🎙️ Real-time Transcription**: Live speech-to-text with WebSocket
-- **🔒 Enterprise Security**: JWT auth, encryption, rate limiting
-- **📚 Auto-generated Docs**: Swagger UI and ReDoc
-- **🏗️ OOP Architecture**: Clean, modular, reusable code
+### 🎨 Modern WPF Interface
+- Beautiful dark-themed overlay window
+- Always-on-top, transparent, draggable
+- Global hotkeys (work even when other apps are focused)
+- Stealth mode (invisible to screen capture/sharing)
+- Live Insights panel with chat and transcript views
 
----
-
-## 🏗️ Project Structure
-
-```
-SnapEye/
-├── Application/                    # WPF Frontend
-│   ├── navbar/                     # Navigation controls
-│   │   ├── CameraButton.xaml
-│   │   ├── ListenButton.xaml
-│   │   └── RangeSliderControl.xaml
-│   ├── SolutionRegion/             # AI Response Display
-│   │   ├── SolutionRegionAlpha.xaml
-│   │   └── SolutionRegionAlpha.xaml.cs
-│   ├── OverlayWindow.xaml          # Main overlay window
-│   ├── App.xaml                    # Application entry
-│   └── SnapEye.csproj              # Project file
-│
-└── backend/                        # FastAPI Backend
-    ├── api/                        # API routes
-    │   ├── routes_auth.py          # Authentication
-    │   ├── routes_search.py        # Search endpoints
-    │   └── routes_realtime.py      # WebSocket transcription
-    ├── config/                     # Configuration
-    │   └── settings.py             # App settings
-    ├── models/                     # Data models
-    │   └── schemas.py              # Pydantic schemas
-    ├── security/                   # Security layer
-    │   └── auth.py                 # JWT & encryption
-    ├── services/                   # Business logic
-    │   ├── openai_service.py       # OpenAI integration
-    │   ├── realtime_service.py     # Transcription
-    │   └── prompts.py              # AI prompts
-    ├── main.py                     # FastAPI app
-    └── requirements.txt            # Dependencies
-```
+### 🔐 Enterprise Security
+- JWT authentication with token refresh
+- Fernet encryption for API keys
+- Local credential storage in Windows AppData
+- No credentials in git repository
+- Rate limiting and CORS protection
 
 ---
 
@@ -70,233 +52,301 @@ SnapEye/
 ### Prerequisites
 
 **Frontend:**
-
-- .NET 8.0 SDK
 - Windows 10/11
+- [.NET 8.0 SDK](https://dotnet.microsoft.com/download)
 
 **Backend:**
-
 - Python 3.10+
-- OpenAI API Key
+- [OpenAI API Key](https://platform.openai.com/api-keys)
+- [Deepgram API Key](https://console.deepgram.com/)
+- (Optional) [Anthropic API Key](https://console.anthropic.com/)
 
-### Installation
+---
 
-#### 1. Backend Setup
+## 📦 Installation
+
+### 1. Clone Repository
 
 ```bash
-# Navigate to backend
+git clone https://github.com/abinesha312/SnapEyeV2.git
+cd SnapEyeV2
+```
+
+### 2. Backend Setup
+
+```bash
 cd backend
 
 # Create virtual environment
 python -m venv venv
-venv\Scripts\activate  # Windows
+
+# Activate virtual environment
+# Windows:
+venv\Scripts\activate
+# macOS/Linux:
+source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Configure environment
-copy env.example .env
-# Edit .env with your OpenAI API key
+# Create configuration files
+cp config/config.example.yaml config/config.yaml
+cp .env.example .env
 
-# Run server
-python main.py
+# Edit .env with your API keys
+notepad .env  # or use your preferred editor
 ```
 
-Backend will be available at: http://localhost:8000
+**Required `.env` variables:**
+```bash
+OPENAI_API_KEY=sk-your-openai-key-here
+DEEPGRAM_API_KEY=your-deepgram-key-here
+SECRET_KEY=generate-with-openssl-rand-hex-32
+ENCRYPTION_KEY=generate-with-python-fernet
 
-- **API Docs**: http://localhost:8000/docs
-- **Health Check**: http://localhost:8000/health
+# Optional
+ANTHROPIC_API_KEY=sk-ant-your-anthropic-key-here
+```
 
-#### 2. Frontend Setup
+**Generate secure keys:**
+```bash
+# Secret Key (JWT signing)
+python -c "import secrets; print(secrets.token_hex(32))"
+
+# Encryption Key (Fernet)
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+### 3. Frontend Setup
 
 ```bash
-# Navigate to Application folder
-cd Application
+cd ../Application
 
-# Build project
+# Copy example config
+cp config/config.example.yaml config/config.yaml
+
+# Build and run
 dotnet build
-
-# Run application
 dotnet run
 ```
 
-The SnapEye overlay window will appear on your screen!
+Or open `Application/SnapEye.sln` in Visual Studio 2022.
+
+### 4. Start Backend Server
+
+```bash
+cd backend
+python main.py
+```
+
+Backend will be available at:
+- API: http://localhost:8080
+- Docs: http://localhost:8080/docs
+- Health: http://localhost:8080/health
 
 ---
 
-## 💻 Usage
+## 🎮 Usage
 
-### Frontend Features
+### Keyboard Shortcuts (Global)
 
-1. **Camera Button** 📷
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+Shift+L` | Toggle listening (start/stop transcription) |
+| `Ctrl+Shift+S` | Screenshot & OCR |
+| `Ctrl+Shift+C` | Copy current AI answer |
+| `Ctrl+Shift+H` | Hide/show overlay |
+| `Ctrl+Shift+Up` | Expand Live Insights panel |
+| `Ctrl+Shift+Down` | Collapse Live Insights panel |
+| `Ctrl+Alt+←/→/↑/↓` | Nudge overlay position (28px increments) |
+| `Ctrl+Enter` | Send message in chat |
 
-   - Click to show sample AI analysis
-   - Displays rich markdown content in Alpha Region
+### Features
 
-2. **Listen Button** 🎧
+1. **Listen Mode** 🎙️
+   - Click the microphone button or press `Ctrl+Shift+L`
+   - Speak naturally - transcription appears in real-time
+   - AI automatically detects questions and provides suggestions
+   - Switch between Chat and Transcript views
 
-   - Shows loading animation
-   - Simulates AI transcription response
-   - Real-time status updates
+2. **Screen Capture** 📷
+   - Press `Ctrl+Shift+S` to capture screen
+   - Text is extracted via OCR
+   - AI analyzes content and provides contextual insights
 
-3. **Opacity Slider** 🎛️
+3. **Quick Actions** ⚡
+   - "What should I say?" - Get conversation suggestions
+   - "Follow up" - Generate follow-up questions
+   - "Fact check" - Verify claims mentioned
+   - "Recap" - Summarize conversation
 
-   - Adjust window transparency (20%-100%)
-   - Controls both navbar and Alpha Region
-   - Smooth real-time updates
+4. **AI Modes** 🤖
+   - General Assistant
+   - Interview Mode
+   - Sales Mode
+   - Meeting Notes
+   - Custom modes (configurable via Dashboard)
 
-4. **Drag to Move** ✋
-   - Click and drag the header to reposition
-   - Always stays on top of other windows
+---
 
-### Backend API
+## 🏗️ Architecture
 
-#### Authentication
-
-```bash
-curl -X POST "http://localhost:8000/auth/login" \
-  -H "Content-Type: application/json" \
-  -d '{"username": "user", "api_key": "your-key"}'
 ```
-
-#### Image Search
-
-```bash
-curl -X POST "http://localhost:8000/api/search/image" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -F "file=@image.jpg" \
-  -F "query=What's in this image?"
-```
-
-#### Text Search
-
-```bash
-curl -X POST "http://localhost:8000/api/search/text" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Explain quantum computing"}'
+┌─────────────────────────────────────────────────────────────┐
+│                     WPF Frontend (.NET 8)                    │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │ OverlayWindow│  │  Dashboard   │  │   Services   │      │
+│  │   (XAML)     │  │   (Config)   │  │  (Audio/OCR) │      │
+│  └──────────────┘  └──────────────┘  └──────────────┘      │
+└─────────────────────────────────────────────────────────────┘
+                           ▼ WebSocket / HTTP
+┌─────────────────────────────────────────────────────────────┐
+│                   FastAPI Backend (Python)                   │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │   API Routes │  │   Services   │  │  LLM Router  │      │
+│  │ (WebSocket)  │  │  (Deepgram)  │  │ (OpenAI/Claude)│    │
+│  └──────────────┘  └──────────────┘  └──────────────┘      │
+└─────────────────────────────────────────────────────────────┘
+                           ▼ API Calls
+┌─────────────────────────────────────────────────────────────┐
+│                      External APIs                           │
+│   Deepgram (Transcription) │ OpenAI (LLM) │ Anthropic       │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 🧩 OOP Design Patterns
+## 📂 Project Structure
 
-### Backend Architecture
-
-1. **Factory Pattern**
-
-   - `OpenAIServiceFactory`: Create service instances
-   - Easy to extend with new AI providers
-
-2. **Strategy Pattern**
-
-   - `BaseAIService`: Abstract base class
-   - `ImageSearchService`, `TextSearchService`: Concrete implementations
-
-3. **Singleton Pattern**
-
-   - `settings`: Global configuration
-   - `security_manager`: Centralized security
-
-4. **Dependency Injection**
-
-   - Services injected via constructors
-   - Loose coupling between components
-
-5. **Repository Pattern**
-   - Prepared for database integration
-   - Clean separation of data access
-
-### Frontend Architecture
-
-1. **MVVM Pattern** (WPF Standard)
-
-   - View (XAML)
-   - ViewModel (Code-behind)
-   - Model (Data classes)
-
-2. **Observer Pattern**
-
-   - Event-driven button clicks
-   - Slider value change notifications
-
-3. **Composite Pattern**
-   - UserControls composition
-   - Modular UI components
+```
+SnapEye/
+├── Application/                    # WPF Frontend
+│   ├── components/                 # UI Components
+│   │   ├── Dashboard/              # Settings & config UI
+│   │   └── SolutionRegion/         # AI response display
+│   ├── services/                   # Business logic
+│   │   ├── RealtimeTranscriptionService.cs
+│   │   ├── ScreenCaptureService.cs
+│   │   ├── GlobalHotkeyService.cs
+│   │   ├── AiModelsService.cs
+│   │   └── PromptsService.cs
+│   ├── config/                     # Configuration
+│   │   ├── AppConfig.cs
+│   │   └── config.example.yaml
+│   ├── OverlayWindow.xaml          # Main window
+│   ├── KeyboardShortcutsWindow.xaml
+│   └── SnapEye.csproj
+│
+├── backend/                        # FastAPI Backend
+│   ├── api/                        # API endpoints
+│   │   ├── routes_realtime.py      # WebSocket transcription
+│   │   ├── routes_llm.py           # LLM streaming
+│   │   └── routes_deepgram_live.py
+│   ├── services/                   # Business logic
+│   │   ├── deepgram_live_service.py
+│   │   ├── llm_router.py
+│   │   ├── ocr_service.py
+│   │   └── rag_service.py
+│   ├── config/                     # Configuration
+│   │   ├── settings.py
+│   │   └── config.example.yaml
+│   ├── security/                   # Auth & encryption
+│   │   └── auth.py
+│   ├── .env.example                # Environment template
+│   ├── requirements.txt
+│   └── main.py                     # FastAPI app
+│
+├── .gitignore                      # Git exclusions (credentials)
+├── SECURITY.md                     # Security documentation
+└── README.md                       # This file
+```
 
 ---
 
 ## 🔧 Configuration
 
-### Backend Environment Variables
+### Backend (`backend/config/config.yaml`)
 
-```env
-OPENAI_API_KEY=your-api-key
-SECRET_KEY=your-secret-key
-ENCRYPTION_KEY=your-encryption-key
-DEBUG=False
-API_PORT=8000
+```yaml
+deepgram:
+  model: "nova-3"              # Deepgram model
+  language: "en"               # Language code
+  
+llm:
+  primary_provider: "openai"   # Primary LLM provider
+  fallback_provider: "anthropic"
+  max_tokens: 4096
+  temperature: 0.7
+
+audio:
+  sample_rate: 24000           # 24kHz audio
+  channels: 1                  # Mono
 ```
 
-See `backend/env.example` for full configuration options.
+### Frontend (`Application/config/config.yaml`)
+
+```yaml
+backend:
+  http_url: "http://localhost:8080"
+  websocket_url: "ws://localhost:8080"
+
+transcription:
+  model: "nova-3"
+  endpointing_ms: 300
+
+ui:
+  opacity: 0.95
+  invisible_to_capture: true
+```
 
 ---
 
-## 📚 API Documentation
+## 🔐 Security
 
-### Endpoints Overview
+**Important**: Never commit credentials to git!
 
-| Method | Endpoint               | Description             |
-| ------ | ---------------------- | ----------------------- |
-| POST   | `/auth/login`          | User authentication     |
-| POST   | `/auth/refresh`        | Refresh access token    |
-| POST   | `/api/search/image`    | Analyze images          |
-| POST   | `/api/search/text`     | Text-based search       |
-| WS     | `/api/transcribe/live` | Real-time transcription |
-| GET    | `/health`              | Health check            |
+✅ **Protected files** (already in `.gitignore`):
+- `.env` - API keys and secrets
+- `config.yaml` - May contain sensitive settings
+- `session.json` - Authentication tokens
+- `ai_models.json` - Encrypted API keys
+- `prompts.json` - User customizations
+- `conversations/` - Chat history
 
-Full interactive documentation at: http://localhost:8000/docs
+📖 See [SECURITY.md](SECURITY.md) for complete security guide.
+
+### If You Accidentally Committed Secrets
+
+```bash
+# Remove from git history
+git filter-branch --force --index-filter \
+  "git rm --cached --ignore-unmatch path/to/secret" \
+  --prune-empty --tag-name-filter cat -- --all
+
+# Force push (rewrites history)
+git push origin --force --all
+
+# IMMEDIATELY rotate exposed credentials!
+```
 
 ---
 
-## 🧪 Testing
+## 🧪 Development
 
 ### Backend Tests
 
 ```bash
 cd backend
-
-# Run all tests
-pytest
-
-# Run with coverage
+pytest tests/ -v
 pytest --cov=backend --cov-report=html
-
-# Run specific test
-pytest tests/test_auth.py -v
 ```
-
----
-
-## 🔒 Security Features
-
-- ✅ JWT-based authentication
-- ✅ Fernet symmetric encryption
-- ✅ API key hashing (SHA-256)
-- ✅ Token expiration and refresh
-- ✅ Rate limiting ready
-- ✅ CORS configuration
-- ✅ SSL/TLS support
-
----
-
-## 🛠️ Development
 
 ### Code Quality
 
 ```bash
-# Format code
+# Format
 black backend/
+autopep8 Application/ --recursive --in-place
 
 # Lint
 flake8 backend/
@@ -306,60 +356,49 @@ pylint backend/
 mypy backend/
 ```
 
-### Adding New Features
+---
 
-**Backend:**
+## 📚 API Documentation
 
-1. Define models in `models/schemas.py`
-2. Create service in `services/`
-3. Add routes in `api/routes_*.py`
-4. Update `main.py` to include router
-5. Write tests
+Interactive API docs available when backend is running:
+- **Swagger UI**: http://localhost:8080/docs
+- **ReDoc**: http://localhost:8080/redoc
 
-**Frontend:**
+### Example API Calls
 
-1. Create XAML component
-2. Implement code-behind
-3. Add to OverlayWindow
-4. Wire up event handlers
+**Authentication:**
+```bash
+curl -X POST "http://localhost:8080/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"username": "user", "api_key": "your-key"}'
+```
+
+**Image Analysis:**
+```bash
+curl -X POST "http://localhost:8080/api/search/image" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "file=@screenshot.jpg" \
+  -F "query=What's in this image?"
+```
+
+**WebSocket Transcription:**
+```javascript
+const ws = new WebSocket('ws://localhost:8080/api/transcribe/audio');
+ws.send(JSON.stringify({ type: 'audio', data: base64Audio }));
+```
 
 ---
 
-## 📦 Dependencies
+## 🛣️ Roadmap
 
-### Frontend
-
-- .NET 8.0
-- Markdig.Wpf 0.5.0.1
-
-### Backend
-
-- FastAPI 0.109.0
-- OpenAI 1.12.0
-- Cryptography 42.0.2
-- PyJWT 2.8.0
-- Pydantic 2.6.0
-- Websockets 12.0
-
----
-
-## 🎯 Roadmap
-
-- [ ] Database integration (PostgreSQL)
+- [ ] Database persistence (PostgreSQL)
 - [ ] Redis caching layer
-- [ ] User management system
-- [ ] Search history tracking
-- [ ] Export functionality
-- [ ] Mobile app integration
+- [ ] Multi-user support
+- [ ] Mobile app companion
 - [ ] Docker containerization
 - [ ] CI/CD pipeline
 - [ ] Monitoring & analytics
-
----
-
-## 📝 License
-
-MIT License - See LICENSE file for details
+- [ ] Cloud deployment guides
 
 ---
 
@@ -373,30 +412,30 @@ MIT License - See LICENSE file for details
 
 ---
 
-## 💬 Support
+## 📝 License
 
-- **Email**: support@snapeye.ai
-- **Documentation**: Full docs available at `/docs` endpoint
-- **Issues**: GitHub Issues
+MIT License - See [LICENSE](LICENSE) file for details.
 
 ---
 
 ## 🙏 Acknowledgments
 
-- OpenAI for GPT-4 Vision and Realtime API
-- FastAPI for the amazing web framework
-- Microsoft for WPF framework
-- Markdig for markdown rendering
+- [Deepgram](https://deepgram.com/) - Real-time speech recognition
+- [OpenAI](https://openai.com/) - GPT-4 Vision & ChatGPT
+- [Anthropic](https://anthropic.com/) - Claude AI
+- [FastAPI](https://fastapi.tiangolo.com/) - Modern Python web framework
+- [Microsoft](https://dotnet.microsoft.com/) - .NET & WPF
 
 ---
 
-<div align="center">
+## 📞 Support
 
-**Built with ❤️ using .NET, Python, and AI**
+- **Issues**: [GitHub Issues](https://github.com/abinesha312/SnapEyeV2/issues)
+- **Documentation**: Full docs at `/docs` endpoint when running
+- **Security**: See [SECURITY.md](SECURITY.md)
 
-[![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![.NET](https://img.shields.io/badge/.NET-512BD4?style=for-the-badge&logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
-[![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=for-the-badge&logo=openai&logoColor=white)](https://openai.com/)
-[![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org/)
+---
 
-</div>
+**Built with ❤️ using .NET 8.0, Python, and AI**
+
+*Last Updated: June 2026*
