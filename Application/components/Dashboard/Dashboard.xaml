@@ -235,14 +235,14 @@
 
                         <!-- API Key Field -->
                         <TextBlock Text="API Key" FontSize="12" Foreground="#666666" Margin="0,0,0,8"/>
-                        <PasswordBox x:Name="ApiKeyPasswordBox" 
+                        <PasswordBox x:Name="ApiKeyPasswordBox"
                                      Style="{StaticResource GlassPasswordBoxStyle}"
                                      Height="45"
                                      Margin="0,0,0,30"
                                      KeyDown="InputField_KeyDown"/>
 
                         <!-- Error Message -->
-                        <TextBlock x:Name="ErrorTextBlock" 
+                        <TextBlock x:Name="ErrorTextBlock"
                                    Foreground="#FF6B6B"
                                    FontSize="12"
                                    TextWrapping="Wrap"
@@ -355,6 +355,15 @@
                                             <Path Width="16" Height="16" Stretch="Uniform" Fill="#6B6478"
                                                   Data="M17,17H7V7H17M21,11V9H19V7A2,2 0 0,0 17,5H15V3H13V5H11V3H9V5H7A2,2 0 0,0 5,7V9H3V11H5V13H3V15H5V17A2,2 0 0,0 7,19H9V21H11V19H13V21H15V19H17A2,2 0 0,0 19,17V15H21V13H19V11M13,13H11V11H13M15,9H9V15H15V9Z"/>
                                             <TextBlock Text="AI Models" Margin="12,0,0,0" VerticalAlignment="Center"/>
+                                        </StackPanel>
+                                    </RadioButton>
+
+                                    <RadioButton x:Name="NavExperience" GroupName="DashNav"
+                                                 Style="{StaticResource NavItemStyle}" Checked="NavExperience_Checked">
+                                        <StackPanel Orientation="Horizontal">
+                                            <Path Width="16" Height="16" Stretch="Uniform" Fill="#6B6478"
+                                                  Data="M10,2H14A2,2 0 0,1 16,4V6H20A2,2 0 0,1 22,8V19A2,2 0 0,1 20,21H4A2,2 0 0,1 2,19V8A2,2 0 0,1 4,6H8V4A2,2 0 0,1 10,2M14,6V4H10V6H14Z"/>
+                                            <TextBlock Text="Experience" Margin="12,0,0,0" VerticalAlignment="Center"/>
                                         </StackPanel>
                                     </RadioButton>
 
@@ -1028,6 +1037,181 @@
                                         <TextBlock x:Name="ShortcutsPrivacyNote" FontSize="12" Foreground="#888888"
                                                    TextWrapping="Wrap" Margin="2,8,0,0" LineHeight="18"/>
                                     </StackPanel>
+                                </ScrollViewer>
+                            </Grid>
+
+                            <!-- Experience view: manage companies/roles + education used to ground answers -->
+                            <Grid x:Name="ExperienceView" Visibility="Collapsed">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+
+                                <Grid Grid.Row="0" Margin="0,4,0,12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0">
+                                        <TextBlock Text="Experience" FontSize="22" FontWeight="Bold" Foreground="#333333"/>
+                                        <TextBlock Text="Add your companies, roles and education. Answers are grounded in these in real time and spoken in your voice."
+                                                   FontSize="12" Foreground="#888888" Margin="0,2,0,0" TextWrapping="Wrap"/>
+                                    </StackPanel>
+                                    <Button Grid.Column="1" x:Name="AddExperienceBtn" Click="AddExperience_Click"
+                                            Height="34" Padding="14,0" Margin="0,0,8,0" VerticalAlignment="Top" Cursor="Hand">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border x:Name="AddExpBorder" Background="#3A7BFF" BorderBrush="#2A64CC" BorderThickness="1" CornerRadius="8" Padding="12,0">
+                                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                                        <Path Width="10" Height="10" Stretch="Uniform" Fill="#FFFFFF"
+                                                              Data="M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z"/>
+                                                        <TextBlock Text="Add experience" Margin="6,0,0,0" VerticalAlignment="Center" FontSize="12" Foreground="#FFFFFF" FontWeight="SemiBold"/>
+                                                    </StackPanel>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="AddExpBorder" Property="Background" Value="#2B5EC8"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                    </Button>
+                                    <Button Grid.Column="2" x:Name="AddEducationBtn" Click="AddEducation_Click"
+                                            Height="34" Padding="14,0" VerticalAlignment="Top" Cursor="Hand">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border x:Name="AddEduBorder" Background="#F2F8FC" BorderBrush="#C5DFF8" BorderThickness="1" CornerRadius="8" Padding="12,0">
+                                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                                        <Path Width="12" Height="12" Stretch="Uniform" Fill="#6B6478"
+                                                              Data="M12,3L1,9L12,15L21,10.09V17H23V9M5,13.18V17.18L12,21L19,17.18V13.18L12,17L5,13.18Z"/>
+                                                        <TextBlock Text="Add education" Margin="8,0,0,0" VerticalAlignment="Center" FontSize="12" Foreground="#6B6478" FontWeight="SemiBold"/>
+                                                    </StackPanel>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="AddEduBorder" Property="Background" Value="#D6EBFF"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                    </Button>
+                                </Grid>
+
+                                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,0,4,0">
+                                    <Grid>
+                                        <ItemsControl x:Name="ExperienceList">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Border Background="#FFFFFF" BorderBrush="#E6E3EF" BorderThickness="1"
+                                                            CornerRadius="10" Margin="0,0,0,10" Padding="14,12">
+                                                        <StackPanel>
+                                                            <Grid Margin="0,0,0,10">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                    <ColumnDefinition Width="Auto"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <Border Grid.Column="0" HorizontalAlignment="Left"
+                                                                        Background="#F2F8FC" BorderBrush="#C5DFF8" BorderThickness="1"
+                                                                        CornerRadius="10" Padding="8,2">
+                                                                    <TextBlock Text="{Binding TypeLabel}" FontSize="10" Foreground="#6B6478" FontWeight="SemiBold"/>
+                                                                </Border>
+                                                                <Button Grid.Column="1" Tag="{Binding}" Click="DeleteExperience_Click"
+                                                                        ToolTip="Remove" Width="28" Height="28" Cursor="Hand"
+                                                                        Background="Transparent" BorderThickness="0">
+                                                                    <Button.Template>
+                                                                        <ControlTemplate TargetType="Button">
+                                                                            <Border x:Name="ExpDelBorder" Background="Transparent" CornerRadius="14">
+                                                                                <Path Width="12" Height="12" Stretch="Uniform" Fill="#B84848"
+                                                                                      HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                                                      Data="M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19M8.46,11.88L9.87,10.47L12,12.59L14.12,10.47L15.53,11.88L13.41,14L15.53,16.12L14.12,17.53L12,15.41L9.88,17.53L8.47,16.12L10.59,14L8.46,11.88M15.5,4L14.5,3H9.5L8.5,4H5V6H19V4H15.5Z"/>
+                                                                            </Border>
+                                                                            <ControlTemplate.Triggers>
+                                                                                <Trigger Property="IsMouseOver" Value="True">
+                                                                                    <Setter TargetName="ExpDelBorder" Property="Background" Value="#FFF4F4"/>
+                                                                                </Trigger>
+                                                                            </ControlTemplate.Triggers>
+                                                                        </ControlTemplate>
+                                                                    </Button.Template>
+                                                                </Button>
+                                                            </Grid>
+
+                                                            <Grid Margin="0,0,0,8">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                    <ColumnDefinition Width="12"/>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <StackPanel Grid.Column="0">
+                                                                    <TextBlock Text="{Binding CompanyLabel}" FontSize="11" Foreground="#888888" Margin="0,0,0,4"/>
+                                                                    <TextBox Text="{Binding Company, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                                             FontSize="13" Padding="8,6" BorderBrush="#C5DFF8" BorderThickness="1" Background="#FFFFFF"/>
+                                                                </StackPanel>
+                                                                <StackPanel Grid.Column="2">
+                                                                    <TextBlock Text="{Binding RoleLabel}" FontSize="11" Foreground="#888888" Margin="0,0,0,4"/>
+                                                                    <TextBox Text="{Binding Role, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                                             FontSize="13" Padding="8,6" BorderBrush="#C5DFF8" BorderThickness="1" Background="#FFFFFF"/>
+                                                                </StackPanel>
+                                                            </Grid>
+
+                                                            <Grid Margin="0,0,0,8">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                    <ColumnDefinition Width="12"/>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <StackPanel Grid.Column="0">
+                                                                    <TextBlock Text="Start (e.g. Jan 2022)" FontSize="11" Foreground="#888888" Margin="0,0,0,4"/>
+                                                                    <TextBox Text="{Binding StartDate, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                                             FontSize="13" Padding="8,6" BorderBrush="#C5DFF8" BorderThickness="1" Background="#FFFFFF"/>
+                                                                </StackPanel>
+                                                                <StackPanel Grid.Column="2">
+                                                                    <TextBlock Text="End (e.g. Present)" FontSize="11" Foreground="#888888" Margin="0,0,0,4"/>
+                                                                    <TextBox Text="{Binding EndDate, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                                             FontSize="13" Padding="8,6" BorderBrush="#C5DFF8" BorderThickness="1" Background="#FFFFFF"/>
+                                                                </StackPanel>
+                                                            </Grid>
+
+                                                            <TextBlock Text="{Binding SummaryLabel}" FontSize="11" Foreground="#888888" Margin="0,0,0,4"/>
+                                                            <TextBox Text="{Binding Summary, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                                     FontSize="12" Padding="8,6" BorderBrush="#C5DFF8" BorderThickness="1" Background="#FFFFFF"
+                                                                     AcceptsReturn="True" TextWrapping="Wrap"
+                                                                     MinHeight="90" MaxHeight="220" VerticalScrollBarVisibility="Auto"/>
+
+                                                            <Grid Margin="0,12,0,0">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                    <ColumnDefinition Width="Auto"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <TextBlock Grid.Column="0" Text="{Binding StatusText}"
+                                                                           FontSize="11" Foreground="#4CAF50" VerticalAlignment="Center"/>
+                                                                <Button Grid.Column="1" Tag="{Binding}" Click="SaveExperience_Click"
+                                                                        Content="Save" Cursor="Hand"
+                                                                        Padding="18,6" FontSize="12" FontWeight="SemiBold"
+                                                                        Background="#3A7BFF" Foreground="#FFFFFF" BorderBrush="#2A64CC" BorderThickness="1">
+                                                                    <Button.Template>
+                                                                        <ControlTemplate TargetType="Button">
+                                                                            <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                                                                    BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6"
+                                                                                    Padding="{TemplateBinding Padding}">
+                                                                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                                            </Border>
+                                                                        </ControlTemplate>
+                                                                    </Button.Template>
+                                                                </Button>
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+
+                                        <TextBlock x:Name="ExperienceEmpty"
+                                                   Text="No experience yet. Click + Add experience to create one."
+                                                   Foreground="#A9A3B8" FontSize="12"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Top"
+                                                   Margin="0,40,0,0" Visibility="Collapsed"/>
+                                    </Grid>
                                 </ScrollViewer>
                             </Grid>
                         </Grid>

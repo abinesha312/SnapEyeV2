@@ -21,8 +21,8 @@ try:
     print("    OK - Security manager initialized")
     
     print("\n[3/5] Loading services...")
-    from services import image_service, text_service
-    print("    OK - AI services loaded")
+    import services  # noqa: F401 - lazy package; submodules load on first real use
+    print("    OK - services package ready")
     
     print("\n[4/5] Loading API routes...")
     from api import routes_auth, routes_search, routes_realtime

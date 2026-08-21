@@ -1,0 +1,40 @@
+# SnapEye backend infrastructure. `podman-compose up -d` brings up the vector DB
+# and the API server together so the backend is a long-lived, always-warm service
+# that the WPF desktop app simply connects to - it is no longer spawned per launch
+# by the client (see Application/services/BackendProcessService.cs).
+services:
+  chromadb:
+    # Must match the chromadb client version pinned in backend/requirements.txt -
+    # Chroma's client/server wire protocol is not compatible across major versions.
+    image: docker.io/chromadb/chroma:1.5.9
+    container_name: snapeye-chromadb
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - chromadb_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Containerfile
+    container_name: snapeye-backend
+    restart: unless-stopped
+    depends_on:
+      - chromadb
+    ports:
+      - "8080:8080"
+    env_file:
+      - ./backend/.env
+    environment:
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+    volumes:
+      - snapeye_sqlite:/app/data
+
+volumes:
+  chromadb_data:
+  snapeye_sqlite:

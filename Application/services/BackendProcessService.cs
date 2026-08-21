@@ -9,10 +9,15 @@ using SnapEye.Config;
 namespace SnapEye.Services
 {
     /// <summary>
-    /// Makes SnapEye fully standalone: launches the Python backend as a hidden child
-    /// process when no backend is already reachable, waits for /health, and guarantees
-    /// the backend dies with the app via a Windows Job Object (kill-on-job-close), so
-    /// no external launcher, watchdog, or background monitor is ever required.
+    /// Checks whether the SnapEye backend (ChromaDB + FastAPI, run via Podman Compose -
+    /// see podman-compose.yml / docs/backend-deployment.md) is reachable. The backend is
+    /// a long-lived service started once (e.g. at Windows logon via the "SnapEye Backend"
+    /// scheduled task), independent of this app's lifecycle - so under normal operation
+    /// this service only polls /health, it never launches or kills the backend itself.
+    ///
+    /// For engineers without Podman installed locally, setting the environment variable
+    /// SNAPEYE_DEV_SPAWN_BACKEND=1 restores the old behavior of spawning
+    /// `python run_server.py` directly as a hidden child process.
     /// </summary>
     public static class BackendProcessService
     {
@@ -27,92 +32,131 @@ namespace SnapEye.Services
         /// </summary>
         public static Task<bool> Ready { get; private set; } = Task.FromResult(false);
 
-        /// <summary>True when a backend was already running and we didn't spawn one.</summary>
+        /// <summary>True when we're using a backend we didn't spawn ourselves (the normal case).</summary>
         public static bool UsingExternalBackend { get; private set; }
 
         /// <summary>
-        /// Ensure a backend is available: reuse an already-running one, otherwise
-        /// spawn our own. Safe to call once at startup; never throws.
+        /// Human-readable reason the backend isn't reachable (e.g. Podman stack not started).
+        /// Empty when things are fine. Surfaced in the UI so the user sees the real cause
+        /// instead of a generic error.
+        /// </summary>
+        public static string LastStartError { get; private set; } = string.Empty;
+
+        private static readonly object startLock = new object();
+        private static bool podmanStartAttempted;
+
+        private static bool DevSpawnEnabled =>
+            Environment.GetEnvironmentVariable("SNAPEYE_DEV_SPAWN_BACKEND") == "1";
+
+        /// <summary>True while a Podman Compose bring-up was triggered and we're waiting on /health.</summary>
+        public static bool PodmanStackStarting { get; private set; }
+
+        /// <summary>
+        /// Ensure a backend is reachable: check /health, and only fall back to spawning our
+        /// own process when SNAPEYE_DEV_SPAWN_BACKEND=1 is set. Idempotent and safe to call
+        /// repeatedly (e.g. at startup AND again when Listen is pressed): a check already in
+        /// flight is reused. Never throws.
         /// </summary>
         public static Task<bool> EnsureBackendAsync()
         {
-            Ready = EnsureBackendCoreAsync();
-            return Ready;
+            lock (startLock)
+            {
+                var current = Ready;
+
+                // A check/start is already running — reuse it instead of duplicating it.
+                if (!current.IsCompleted)
+                    return current;
+
+                // Previously succeeded and (if we spawned it ourselves) the process is still
+                // alive — nothing to do.
+                if (current.Status == TaskStatus.RanToCompletion && current.Result)
+                {
+                    if (UsingExternalBackend || (backendProcess != null && !backendProcess.HasExited))
+                        return current;
+                }
+
+                // Otherwise (never checked, failed, or a dev-spawned process died): (re)check.
+                Ready = EnsureBackendCoreAsync();
+                return Ready;
+            }
         }
 
         private static async Task<bool> EnsureBackendCoreAsync()
         {
             try
             {
-                // A backend may already be running (developer started it manually).
+                LastStartError = string.Empty;
+
+                // Normal path: the backend is managed by Podman Compose and should already
+                // be up. We only check reachability - starting/stopping it is Podman's job.
                 if (await IsHealthyAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false))
                 {
                     UsingExternalBackend = true;
-                    Trace.WriteLine("[Backend] External backend already running, reusing it");
+                    Trace.WriteLine("[Backend] Backend is reachable");
                     return true;
                 }
 
-                string? backendDir = FindBackendDirectory();
-                if (backendDir == null)
+                if (!DevSpawnEnabled)
                 {
-                    Trace.WriteLine("[Backend] backend folder not found; set SNAPEYE_BACKEND_DIR to enable auto-start");
+                    // Give a backend that's mid-startup (scheduled task / prior compose up)
+                    // a short window before we try to start the stack ourselves.
+                    bool healthy = await WaitForHealthyPollAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+                    if (healthy)
+                    {
+                        UsingExternalBackend = true;
+                        return true;
+                    }
+
+                    // Auto-start Podman Compose once per process so Listen doesn't stall
+                    // 10–30s waiting for a stack the user never manually launched.
+                    if (!podmanStartAttempted)
+                    {
+                        podmanStartAttempted = true;
+                        if (TryStartPodmanStack())
+                        {
+                            PodmanStackStarting = true;
+                            try
+                            {
+                                healthy = await WaitForHealthyPollAsync(TimeSpan.FromSeconds(90)).ConfigureAwait(false);
+                                if (healthy)
+                                {
+                                    UsingExternalBackend = true;
+                                    Trace.WriteLine("[Backend] Podman stack is up and healthy");
+                                    return true;
+                                }
+                            }
+                            finally
+                            {
+                                PodmanStackStarting = false;
+                            }
+                        }
+                    }
+
+                    LastStartError =
+                        "Backend not running. Start it via scripts\\start-snapeye-backend.ps1 " +
+                        "(see docs\\backend-deployment.md) or install the SnapEye Backend scheduled task.";
+                    Trace.WriteLine("[Backend] Not reachable after Podman auto-start attempt");
                     return false;
                 }
 
-                string python = FindPython(backendDir);
-                Trace.WriteLine($"[Backend] Starting: \"{python}\" run_server.py (cwd={backendDir})");
-
-                OpenLog();
-
-                var psi = new ProcessStartInfo
-                {
-                    FileName = python,
-                    Arguments = "run_server.py",
-                    WorkingDirectory = backendDir,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                };
-                psi.EnvironmentVariables["PYTHONUNBUFFERED"] = "1";
-                psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
-
-                var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-                process.OutputDataReceived += (_, e) => WriteLog(e.Data);
-                process.ErrorDataReceived += (_, e) => WriteLog(e.Data);
-
-                if (!process.Start())
-                {
-                    Trace.WriteLine("[Backend] Process.Start returned false");
-                    return false;
-                }
-
-                backendProcess = process;
-                AttachKillOnCloseJob(process);
-                process.BeginOutputReadLine();
-                process.BeginErrorReadLine();
-
-                bool healthy = await WaitForHealthyAsync(process, TimeSpan.FromSeconds(60)).ConfigureAwait(false);
-                Trace.WriteLine(healthy
-                    ? "[Backend] Backend is up and healthy"
-                    : "[Backend] Backend did not become healthy in time (see backend.log)");
-                return healthy;
+                return await DevSpawnBackendAsync().ConfigureAwait(false);
             }
             catch (Exception ex)
             {
-                Trace.WriteLine($"[Backend] Auto-start failed: {ex.Message}");
+                LastStartError = ex.Message;
+                Trace.WriteLine($"[Backend] EnsureBackendCoreAsync failed: {ex.Message}");
                 return false;
             }
         }
 
-        /// <summary>Stop the backend we spawned (no-op for an external backend).</summary>
+        /// <summary>Stop the backend we spawned in dev-mode (no-op otherwise - Podman owns its lifecycle).</summary>
         public static void Stop()
         {
             try
             {
                 if (backendProcess != null && !backendProcess.HasExited)
                 {
-                    Trace.WriteLine("[Backend] Stopping backend process");
+                    Trace.WriteLine("[Backend] Stopping dev-spawned backend process");
                     backendProcess.Kill(entireProcessTree: true);
                     backendProcess.WaitForExit(3000);
                 }
@@ -154,6 +198,93 @@ namespace SnapEye.Services
             }
         }
 
+        /// <summary>Poll /health every 500ms until reachable or the timeout elapses.</summary>
+        private static async Task<bool> WaitForHealthyPollAsync(TimeSpan timeout)
+        {
+            var deadline = DateTime.UtcNow + timeout;
+            while (DateTime.UtcNow < deadline)
+            {
+                if (await IsHealthyAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false))
+                    return true;
+                await Task.Delay(500).ConfigureAwait(false);
+            }
+            return false;
+        }
+
+        // === Dev-only fallback: spawn `python run_server.py` directly ===
+        // Only reached when SNAPEYE_DEV_SPAWN_BACKEND=1 is set. Not used in normal operation,
+        // where the backend is started once via Podman Compose (see podman-compose.yml).
+
+        private static async Task<bool> DevSpawnBackendAsync()
+        {
+            string? backendDir = FindBackendDirectory();
+            if (backendDir == null)
+            {
+                LastStartError = "backend folder not found (set SNAPEYE_BACKEND_DIR)";
+                Trace.WriteLine("[Backend] backend folder not found; set SNAPEYE_BACKEND_DIR to enable dev auto-start");
+                return false;
+            }
+
+            try
+            {
+                var (python, argPrefix) = FindPythonInvocation(backendDir);
+                string arguments = argPrefix + "run_server.py";
+                Trace.WriteLine($"[Backend] Dev-spawning: \"{python}\" {arguments} (cwd={backendDir})");
+
+                OpenLog();
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = python,
+                    Arguments = arguments,
+                    WorkingDirectory = backendDir,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                psi.EnvironmentVariables["PYTHONUNBUFFERED"] = "1";
+                psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+
+                var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+                process.OutputDataReceived += (_, e) => WriteLog(e.Data);
+                process.ErrorDataReceived += (_, e) => WriteLog(e.Data);
+
+                if (!process.Start())
+                {
+                    LastStartError = "could not launch Python process";
+                    Trace.WriteLine("[Backend] Process.Start returned false");
+                    return false;
+                }
+
+                backendProcess = process;
+                AttachKillOnCloseJob(process);
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+
+                bool healthy = await WaitForHealthyAsync(process, TimeSpan.FromSeconds(60)).ConfigureAwait(false);
+                Trace.WriteLine(healthy
+                    ? "[Backend] Dev-spawned backend is up and healthy"
+                    : "[Backend] Dev-spawned backend did not become healthy in time (see backend.log)");
+                if (!healthy && string.IsNullOrEmpty(LastStartError))
+                    LastStartError = "backend did not become healthy in time (see %AppData%\\SnapEye\\logs\\backend.log)";
+                return healthy;
+            }
+            catch (System.ComponentModel.Win32Exception wex)
+            {
+                // Almost always "python not found on PATH".
+                LastStartError = $"Python not found ({wex.Message}). Install Python or set up backend/venv.";
+                Trace.WriteLine($"[Backend] Dev auto-start failed (python missing?): {wex.Message}");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                LastStartError = ex.Message;
+                Trace.WriteLine($"[Backend] Dev auto-start failed: {ex.Message}");
+                return false;
+            }
+        }
+
         private static async Task<bool> WaitForHealthyAsync(Process process, TimeSpan timeout)
         {
             var deadline = DateTime.UtcNow + timeout;
@@ -161,6 +292,7 @@ namespace SnapEye.Services
             {
                 if (process.HasExited)
                 {
+                    LastStartError = $"backend process exited early (code {process.ExitCode}); see %AppData%\\SnapEye\\logs\\backend.log";
                     Trace.WriteLine($"[Backend] Process exited early with code {process.ExitCode}");
                     return false;
                 }
@@ -171,7 +303,56 @@ namespace SnapEye.Services
             return false;
         }
 
-        // === Locating the backend and python ===
+        /// <summary>
+        /// Fire-and-forget launch of scripts/start-snapeye-backend.ps1 (Podman machine +
+        /// podman-compose up -d). Returns false when the script can't be found or Podman
+        /// isn't installed — callers fall back to a clear LastStartError.
+        /// </summary>
+        private static bool TryStartPodmanStack()
+        {
+            try
+            {
+                string? script = FindStartBackendScript();
+                if (script == null)
+                {
+                    Trace.WriteLine("[Backend] start-snapeye-backend.ps1 not found; skipping Podman auto-start");
+                    return false;
+                }
+
+                Trace.WriteLine($"[Backend] Auto-starting Podman stack: {script}");
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = $"-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File \"{script}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                Process.Start(psi);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Trace.WriteLine($"[Backend] Podman auto-start failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static string? FindStartBackendScript()
+        {
+            foreach (var start in new[] { AppDomain.CurrentDomain.BaseDirectory, Directory.GetCurrentDirectory() })
+            {
+                var dir = new DirectoryInfo(start);
+                for (int i = 0; i < 8 && dir != null; i++, dir = dir.Parent)
+                {
+                    string candidate = Path.Combine(dir.FullName, "scripts", "start-snapeye-backend.ps1");
+                    if (File.Exists(candidate))
+                        return candidate;
+                }
+            }
+            return null;
+        }
+
+        // === Locating the backend and python (dev-mode only) ===
 
         private static string? FindBackendDirectory()
         {
@@ -195,25 +376,63 @@ namespace SnapEye.Services
             return null;
         }
 
-        private static string FindPython(string backendDir)
+        /// <summary>
+        /// Resolves how to launch Python for the backend. Prefers a project venv, then a
+        /// <c>python.exe</c> resolvable on PATH (covers conda/base and system installs), then
+        /// the <c>py</c> launcher. Returns the executable plus the argument prefix so callers
+        /// can prepend it to <c>run_server.py</c>. Falls back to bare "python" (which surfaces
+        /// a clear error via the Win32Exception handler if Python truly isn't installed).
+        /// </summary>
+        private static (string fileName, string argPrefix) FindPythonInvocation(string backendDir)
         {
             string? repoRoot = Directory.GetParent(backendDir)?.FullName;
-            var candidates = new[]
+            var venvCandidates = new[]
             {
                 Path.Combine(backendDir, "venv", "Scripts", "python.exe"),
                 Path.Combine(backendDir, ".venv", "Scripts", "python.exe"),
                 repoRoot == null ? null : Path.Combine(repoRoot, "venv", "Scripts", "python.exe"),
                 repoRoot == null ? null : Path.Combine(repoRoot, ".venv", "Scripts", "python.exe"),
             };
-            foreach (var c in candidates)
+            foreach (var c in venvCandidates)
             {
                 if (c != null && File.Exists(c))
-                    return c;
+                    return (c, "");
             }
-            return "python"; // fall back to PATH
+
+            // No venv (common on this machine): use whatever python is on PATH.
+            var onPath = ResolveExecutableOnPath("python.exe");
+            if (onPath != null)
+                return (onPath, "");
+
+            // Windows py launcher as a last structured attempt.
+            var py = ResolveExecutableOnPath("py.exe");
+            if (py != null)
+                return (py, "-3 ");
+
+            return ("python", ""); // last resort; Win32Exception handler explains if missing
         }
 
-        // === Logging ===
+        /// <summary>Finds an executable by scanning the PATH environment variable.</summary>
+        private static string? ResolveExecutableOnPath(string exeName)
+        {
+            try
+            {
+                string path = Environment.GetEnvironmentVariable("PATH") ?? "";
+                foreach (var dir in path.Split(Path.PathSeparator))
+                {
+                    if (string.IsNullOrWhiteSpace(dir)) continue;
+                    string full;
+                    try { full = Path.Combine(dir.Trim(), exeName); }
+                    catch { continue; }
+                    if (File.Exists(full))
+                        return full;
+                }
+            }
+            catch { /* best effort */ }
+            return null;
+        }
+
+        // === Logging (dev-mode only) ===
 
         private static void OpenLog()
         {
@@ -242,8 +461,8 @@ namespace SnapEye.Services
             }
         }
 
-        // === Job object: the OS kills the backend whenever the app exits, even on a
-        // hard crash, so no watchdog or monitoring process is ever needed. ===
+        // === Job object (dev-mode only): the OS kills the dev-spawned backend whenever the
+        // app exits, even on a hard crash, so no watchdog or monitoring process is needed. ===
 
         private static void AttachKillOnCloseJob(Process process)
         {

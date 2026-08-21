@@ -523,7 +523,10 @@
                     <Button.ContextMenu>
                         <ContextMenu x:Name="SettingsMenu">
                             <MenuItem Header="Invisible to capture" Click="Stealth_Click"/>
+                            <MenuItem Header="Experience…" Click="Experience_Click"/>
                             <MenuItem Header="Keyboard shortcuts…" Click="KeyboardShortcuts_Click"/>
+                            <MenuItem Header="New conversation" Click="NewConversation_Click"
+                                      ToolTip="Start a fresh conversation thread (the current one is saved)"/>
                             <Separator/>
                             <MenuItem Header="Listen (Live)" Click="MicToggleFromMenu_Click" InputGestureText="Ctrl+Shift+L"/>
                             <MenuItem Header="Copy answer" Click="CopyAnswer_Click" InputGestureText="Ctrl+Shift+C"/>
@@ -593,27 +596,54 @@
                     <Border Grid.Row="0" Padding="10,6,10,6" Background="#1AFFFFFF">
                         <Border.BorderBrush><SolidColorBrush Color="#3F3F46"/></Border.BorderBrush>
                         <Border.BorderThickness><Thickness>0,0,0,1</Thickness></Border.BorderThickness>
-                        <Grid VerticalAlignment="Center">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <Border Grid.Column="0" CornerRadius="8" Background="#3A3A40" BorderBrush="#52525B"
-                                    BorderThickness="1" ClipToBounds="True" Margin="0,0,8,0" VerticalAlignment="Center" Height="28">
-                                <ComboBox x:Name="ModeSelector" Style="{StaticResource DarkComboStyle}" SelectionChanged="ModeSelector_Changed"
-                                          MinWidth="140" FontSize="12" Padding="6,0,22,0" MinHeight="26">
-                                    <ComboBox.Resources>
-                                        <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#2A2A2E"/>
-                                        <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#F4F4F5"/>
-                                        <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#2563EB"/>
-                                        <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
-                                    </ComboBox.Resources>
-                                </ComboBox>
-                            </Border>
-                            <ToggleButton x:Name="TranscriptToggle" Grid.Column="1" Content="Transcript"
-                                          Style="{StaticResource ToggleBtnStyle}" Checked="TranscriptToggle_Changed"
-                                          Unchecked="TranscriptToggle_Changed" Height="28" Padding="10,3" VerticalAlignment="Center" FontSize="11"/>
-                        </Grid>
+                        <StackPanel>
+                            <Grid VerticalAlignment="Center">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <Border Grid.Column="0" CornerRadius="8" Background="#3A3A40" BorderBrush="#52525B"
+                                        BorderThickness="1" ClipToBounds="True" Margin="0,0,8,0" VerticalAlignment="Center" Height="28">
+                                    <ComboBox x:Name="ModeSelector" Style="{StaticResource DarkComboStyle}" SelectionChanged="ModeSelector_Changed"
+                                              MinWidth="140" FontSize="12" Padding="6,0,22,0" MinHeight="26">
+                                        <ComboBox.Resources>
+                                            <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#2A2A2E"/>
+                                            <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#F4F4F5"/>
+                                            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#2563EB"/>
+                                            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+                                        </ComboBox.Resources>
+                                    </ComboBox>
+                                </Border>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                    <ToggleButton x:Name="JobDetailsToggle" Content="Job details" Visibility="Collapsed"
+                                                  Style="{StaticResource ToggleBtnStyle}" Checked="JobDetailsToggle_Changed"
+                                                  Unchecked="JobDetailsToggle_Changed" Height="28" Padding="10,3"
+                                                  VerticalAlignment="Center" FontSize="11" Margin="0,0,6,0"/>
+                                    <ToggleButton x:Name="TranscriptToggle" Content="Transcript"
+                                                  Style="{StaticResource ToggleBtnStyle}" Checked="TranscriptToggle_Changed"
+                                                  Unchecked="TranscriptToggle_Changed" Height="28" Padding="10,3" VerticalAlignment="Center" FontSize="11"/>
+                                </StackPanel>
+                            </Grid>
+
+                            <!-- Optional, non-blocking job details for Interview Mode. Never shown as a
+                                 popup - the mode's system_prompt already works standalone without these;
+                                 filling them in just tailors answers to a specific role. -->
+                            <StackPanel x:Name="JobDetailsPanel" Visibility="Collapsed" Margin="0,8,0,0">
+                                <TextBlock Text="COMPANY (OPTIONAL)" FontSize="9" Foreground="#A1A1AA" Margin="2,0,0,3"/>
+                                <TextBox x:Name="JobCompanyBox" Margin="0,0,0,6"
+                                         Background="#3A3A40" Foreground="#F4F4F5" BorderBrush="#52525B" BorderThickness="1"
+                                         Padding="8,5" FontSize="12" LostFocus="JobDetailsField_LostFocus"/>
+                                <TextBlock Text="ROLE (OPTIONAL)" FontSize="9" Foreground="#A1A1AA" Margin="2,0,0,3"/>
+                                <TextBox x:Name="JobRoleBox" Margin="0,0,0,6"
+                                         Background="#3A3A40" Foreground="#F4F4F5" BorderBrush="#52525B" BorderThickness="1"
+                                         Padding="8,5" FontSize="12" LostFocus="JobDetailsField_LostFocus"/>
+                                <TextBlock Text="JOB DESCRIPTION (OPTIONAL)" FontSize="9" Foreground="#A1A1AA" Margin="2,0,0,3"/>
+                                <TextBox x:Name="JobDescriptionBox" AcceptsReturn="True"
+                                         TextWrapping="Wrap" Height="60" VerticalScrollBarVisibility="Auto"
+                                         Background="#3A3A40" Foreground="#F4F4F5" BorderBrush="#52525B" BorderThickness="1"
+                                         Padding="8,5" FontSize="12" LostFocus="JobDetailsField_LostFocus"/>
+                            </StackPanel>
+                        </StackPanel>
                     </Border>
 
                     <solution:SolutionRegionAlpha x:Name="AlphaRegion" Grid.Row="1"/>
@@ -628,6 +658,27 @@
                             </Grid.ColumnDefinitions>
                             <WrapPanel x:Name="QuickActionsPanel" Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center"/>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Button x:Name="StopBtn" Width="30" Height="30" Margin="6,0,0,0"
+                                        Click="StopBtn_Click" ToolTip="Stop / cancel the current response (Esc)"
+                                        Cursor="Hand" VerticalAlignment="Center" Visibility="Collapsed">
+                                    <Button.Template>
+                                        <ControlTemplate TargetType="Button">
+                                            <Border x:Name="StopBorder" Width="30" Height="30" CornerRadius="15"
+                                                    Background="#33DC2626" BorderBrush="#DC2626" BorderThickness="1">
+                                                <Viewbox Width="14" Height="14">
+                                                    <Canvas Width="24" Height="24">
+                                                        <Path Fill="#FCA5A5" Data="M6,6H18V18H6V6Z"/>
+                                                    </Canvas>
+                                                </Viewbox>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter TargetName="StopBorder" Property="Background" Value="#4DDC2626"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Button.Template>
+                                </Button>
                                 <Button x:Name="RegenBtn" Width="30" Height="30" Margin="6,0,0,0"
                                         Click="RegenBtn_Click" ToolTip="Answer again — same question, different explanation"
                                         Cursor="Hand" VerticalAlignment="Center">
@@ -673,6 +724,41 @@
                                         </ControlTemplate>
                                     </Button.Template>
                                 </Button>
+                                <ToggleButton x:Name="MicMuteBtn" Width="30" Height="30" Margin="6,0,0,0"
+                                              Checked="MicMuteBtn_Changed" Unchecked="MicMuteBtn_Changed"
+                                              ToolTip="Mute microphone (` + Space)"
+                                              Cursor="Hand" VerticalAlignment="Center">
+                                    <ToggleButton.Template>
+                                        <ControlTemplate TargetType="ToggleButton">
+                                            <Border x:Name="MicBorder" Width="30" Height="30" CornerRadius="15"
+                                                    Background="#332563EB" BorderBrush="#2563EB" BorderThickness="1">
+                                                <Grid>
+                                                    <Viewbox x:Name="MicOnIcon" Width="16" Height="16">
+                                                        <Canvas Width="24" Height="24">
+                                                            <Path Fill="#93C5FD" Data="M12,2A3,3 0 0,1 15,5V11A3,3 0 0,1 9,11V5A3,3 0 0,1 12,2M19,11C19,14.53 16.39,17.44 13,17.93V21H11V17.93C7.61,17.44 5,14.53 5,11H7A5,5 0 0,0 12,16A5,5 0 0,0 17,11H19Z"/>
+                                                        </Canvas>
+                                                    </Viewbox>
+                                                    <Viewbox x:Name="MicOffIcon" Width="16" Height="16" Visibility="Collapsed">
+                                                        <Canvas Width="24" Height="24">
+                                                            <Path Fill="#FCA5A5" Data="M19,11C19,12.19 18.66,13.3 18.1,14.28L16.87,13.05C17.14,12.43 17.3,11.74 17.3,11H19M15,11.16L9,5.18V5A3,3 0 0,1 12,2A3,3 0 0,1 15,5V11.16M4.27,3L21,19.73L19.73,21L15.54,16.81C14.77,17.27 13.91,17.58 13,17.72V21H11V17.72C7.72,17.23 5,14.41 5,11H6.7C6.7,14 9.24,16.1 12,16.1C12.81,16.1 13.6,15.91 14.31,15.58L12.65,13.92L12,14A3,3 0 0,1 9,11V10.28L3,4.27L4.27,3Z"/>
+                                                        </Canvas>
+                                                    </Viewbox>
+                                                </Grid>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter TargetName="MicBorder" Property="Background" Value="#4D2563EB"/>
+                                                </Trigger>
+                                                <Trigger Property="IsChecked" Value="True">
+                                                    <Setter TargetName="MicBorder" Property="Background" Value="#33DC2626"/>
+                                                    <Setter TargetName="MicBorder" Property="BorderBrush" Value="#DC2626"/>
+                                                    <Setter TargetName="MicOnIcon" Property="Visibility" Value="Collapsed"/>
+                                                    <Setter TargetName="MicOffIcon" Property="Visibility" Value="Visible"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </ToggleButton.Template>
+                                </ToggleButton>
                             </StackPanel>
                         </Grid>
                     </Border>

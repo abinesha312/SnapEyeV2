@@ -11,9 +11,10 @@ import json
 import logging
 import asyncio
 import time
-from typing import Optional, Callable, Dict, List
+import re
+import difflib
+from typing import Optional, Callable, Dict, List, Tuple
 from datetime import datetime
-from deepgram import DeepgramClient
 from config import settings
 
 # Import AudioMessage for compatibility
@@ -45,23 +46,42 @@ class DeepgramLiveTranscriptionService:
         language: str = settings.DEEPGRAM_LANGUAGE,
         endpointing_ms: int = 300,  # Endpointing threshold in milliseconds
         vad_events: bool = True,  # Voice Activity Detection events
+        source: str = "microphone",  # FIXED audio source for this connection
+        id_offset: int = 0,  # Starting offset for message IDs (keeps streams unique)
+        username: Optional[str] = None,  # Owning user, for per-user RAG/experience scoping
     ):
         """
         Initialize Deepgram Live Transcription Service
-        
+
+        Each instance owns ONE Deepgram WebSocket and transcribes exactly ONE audio
+        source (microphone OR speaker). Mixing two sources onto a single stream makes
+        the audio interleave and the source attribution unreliable, so callers should
+        create one instance per source (see DualDeepgramSession).
+
         Args:
             api_key: Deepgram API key (uses settings default if None)
             model: Deepgram model (nova-3 recommended)
             language: Language code (en, es, fr, etc.)
             endpointing_ms: Milliseconds of silence to trigger endpoint (default: 300ms)
             vad_events: Enable Voice Activity Detection events
+            source: The fixed source label ("microphone" or "speaker") for every
+                transcript produced by this connection.
+            id_offset: Base value for this stream's message counter so message IDs
+                never collide with the other stream (e.g. speaker uses a large offset).
         """
         self.api_key = api_key or settings.DEEPGRAM_API_KEY
         self.model = model
         self.language = language
         self.endpointing_ms = endpointing_ms
         self.vad_events = vad_events
-        
+        # This connection's fixed source — never changes for the lifetime of the stream.
+        self.source = source if source in ("microphone", "speaker") else "microphone"
+        self.id_offset = id_offset
+        self.username = username
+
+        # Deferred import: the deepgram-sdk import chain is expensive and should not
+        # happen at process/module import time - only when a real session is created.
+        from deepgram import DeepgramClient
         self.deepgram = DeepgramClient(api_key=self.api_key)
         self.ws_connection = None
         self.ws_client = None
@@ -80,18 +100,24 @@ class DeepgramLiveTranscriptionService:
         self._keyword_detector = None
         self._context_manager = None
         self._ai_pipeline_enabled = True
+        # Optional shared lock so only one AI answer streams at a time across BOTH
+        # the mic and speaker streams (set by DualDeepgramSession.enable_ai_pipeline).
+        self._ai_lock: Optional[asyncio.Lock] = None
+        # Echo-suppression hooks (wired by DualDeepgramSession):
+        #  _echo_check(text) -> True if this (mic) transcript is an echo of speaker
+        #    audio the microphone picked up, and should be dropped entirely.
+        #  _record_final(text) -> store a (speaker) final so the mic side can compare.
+        self._echo_check: Optional[Callable[[str], bool]] = None
+        self._record_final: Optional[Callable[[str], None]] = None
         
         # Message management
         self.messages: List[AudioMessage] = []
         self.current_message: Optional[AudioMessage] = None
-        self.message_counter = 0
+        # Start the counter at the stream's offset so mic/speaker IDs never collide.
+        self.message_counter = id_offset
         # Finalized segments of the current message. Interim results are cumulative
         # per segment, so the displayed text is always: finals + latest interim.
         self.current_final_parts: List[str] = []
-        
-        # Source tracking
-        self.current_source: Optional[str] = None
-        self.previous_source: Optional[str] = None
         
         # Audio buffering for small chunks (100ms)
         self.audio_buffer: bytes = b''
@@ -107,6 +133,13 @@ class DeepgramLiveTranscriptionService:
         self.receive_task: Optional[asyncio.Task] = None
         self.buffer_flush_task: Optional[asyncio.Task] = None
         self.ai_task: Optional[asyncio.Task] = None
+        # Periodically sends a Deepgram KeepAlive when the stream is idle (no audio)
+        # so Deepgram doesn't close the connection with a 1011 timeout. Without this,
+        # an idle source (silent speaker, or a muted mic) drops the connection and
+        # audio is lost across the reconnect.
+        self.keepalive_task: Optional[asyncio.Task] = None
+        # Seconds of no-audio before we start sending KeepAlive frames.
+        self.keepalive_idle_seconds = 5.0
         
         logger.info(f"Initialized DeepgramLiveTranscriptionService (model: {model}, endpointing: {endpointing_ms}ms)")
     
@@ -157,6 +190,8 @@ class DeepgramLiveTranscriptionService:
             self.is_connected = True
             self.reconnect_attempts = 0
             self.reconnect_delay = 1.0
+            # Treat the connect moment as the last send so the keepalive timer is sane.
+            self.last_send_time = time.time()
             
             logger.info("Connected to Deepgram Live WebSocket")
             
@@ -165,6 +200,9 @@ class DeepgramLiveTranscriptionService:
             
             # Start buffer flush task (sends buffered audio periodically)
             self.buffer_flush_task = asyncio.create_task(self._buffer_flush_loop())
+
+            # Start keepalive loop (prevents 1011 idle-timeout disconnects)
+            self.keepalive_task = asyncio.create_task(self._keepalive_loop())
             
             return True
             
@@ -190,14 +228,15 @@ class DeepgramLiveTranscriptionService:
                 await self.on_error_callback(f"Connection failed: {error_msg}")
             return False
     
-    async def send_audio(self, audio_data: bytes, source: str = "microphone") -> bool:
+    async def send_audio(self, audio_data: bytes, source: Optional[str] = None) -> bool:
         """
         Send audio chunk to Deepgram (buffers small chunks for efficiency)
-        
+
         Args:
             audio_data: PCM16 audio bytes (24kHz, mono)
-            source: "microphone" or "speaker"
-            
+            source: Ignored — this connection always transcribes self.source. The
+                parameter is kept for call-site compatibility only.
+
         Returns:
             True if sent successfully
         """
@@ -209,9 +248,7 @@ class DeepgramLiveTranscriptionService:
         try:
             if len(audio_data) == 0:
                 return False
-            
-            # Update source tracking
-            self.current_source = source
+
             self.last_audio_time = time.time()
             
             # Add to buffer
@@ -224,7 +261,7 @@ class DeepgramLiveTranscriptionService:
                 # Send buffered audio
                 if self.audio_buffer:
                     self.ws_client.send_media(self.audio_buffer)
-                    logger.debug(f"Sent {len(self.audio_buffer)} bytes ({buffer_duration_ms:.0f}ms) from {source}")
+                    logger.debug(f"Sent {len(self.audio_buffer)} bytes ({buffer_duration_ms:.0f}ms) from {self.source}")
                     self.audio_buffer = b''
                     self.last_send_time = time.time()
                     return True
@@ -261,6 +298,41 @@ class DeepgramLiveTranscriptionService:
                 break
             except Exception as e:
                 logger.error(f"Buffer flush loop error: {e}")
+
+    async def _keepalive_loop(self):
+        """
+        Send a Deepgram KeepAlive whenever the stream has been idle (no audio sent)
+        for longer than keepalive_idle_seconds. This stops Deepgram from closing an
+        idle connection with a 1011 timeout — which previously caused constant
+        reconnects on the speaker stream during silence (and would also affect a
+        muted microphone), dropping audio across the gap.
+        """
+        # Check a bit more often than the idle threshold so we react promptly.
+        interval = max(1.0, self.keepalive_idle_seconds / 2.0)
+        while self.is_connected:
+            try:
+                await asyncio.sleep(interval)
+                if not self.is_connected or not self.ws_client:
+                    continue
+                last = self.last_send_time or 0.0
+                if (time.time() - last) >= self.keepalive_idle_seconds:
+                    try:
+                        from deepgram.extensions.types.sockets.listen_v1_control_message import (
+                            ListenV1ControlMessage,
+                        )
+                        self.ws_client.send_control(
+                            ListenV1ControlMessage(type="KeepAlive")
+                        )
+                        # Count the keepalive as a send so we don't spam every tick.
+                        self.last_send_time = time.time()
+                        logger.debug(f"Sent KeepAlive ({self.source})")
+                    except Exception as e:
+                        logger.error(f"KeepAlive send error ({self.source}): {e}")
+                        await self._handle_reconnect()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Keepalive loop error: {e}")
     
     async def _receive_loop(self):
         """
@@ -370,43 +442,50 @@ class DeepgramLiveTranscriptionService:
             is_final = data.get("is_final", False)
             speech_final = data.get("speech_final", False)
             confidence = alternative.get("confidence", 0.0)
-            
-            # Check for source change
-            source_changed = (
-                self.current_source and 
-                self.previous_source and 
-                self.current_source != self.previous_source
-            )
-            
-            # Create new message if:
-            # 1. No current message exists
-            # 2. Source changed (microphone <-> speaker)
-            # 3. Final result and endpointing detected (handled in _handle_endpoint)
-            
-            if self.current_message is None or source_changed:
-                # Finalize previous message if exists
-                if self.current_message:
-                    self.current_message.is_final = True
-                    logger.info(f"Finalized message {self.current_message.message_id} (source change)")
-                
-                # Create new message
+
+            # Echo suppression: when the microphone physically picks up the speaker
+            # output, the other party's words are transcribed on BOTH streams. Drop
+            # the mic copy entirely (no client, no context, no AI) when it matches a
+            # recent speaker final. The speaker side records its finals for comparison.
+            if self._echo_check is not None:
+                try:
+                    if self._echo_check(transcript):
+                        logger.debug(f"Suppressed echo on mic stream: {transcript[:50]}")
+                        return
+                except Exception as e:
+                    logger.debug(f"Echo check error: {e}")
+            if is_final and self._record_final is not None:
+                try:
+                    self._record_final(transcript)
+                except Exception as e:
+                    logger.debug(f"Record-final error: {e}")
+
+            # This connection has a single fixed source, so a new message is started
+            # only when there is no in-progress message (i.e. after the previous one was
+            # endpointed). The two sources can never be confused because they live on
+            # separate Deepgram connections.
+            if self.current_message is None:
                 self.message_counter += 1
                 self.current_message = AudioMessage.from_source(
                     message_id=self.message_counter,
-                    source=self.current_source or "microphone"
+                    source=self.source,
                 )
                 self.messages.append(self.current_message)
-                self.previous_source = self.current_source
                 self.current_final_parts = []
 
-                logger.info(f"Created message {self.current_message.message_id} (source: {self.current_source})")
+                logger.info(f"Created message {self.current_message.message_id} (source: {self.source})")
 
             # Build message text without duplicating words:
             # Deepgram interim results are CUMULATIVE for the in-progress segment,
             # so an interim must REPLACE the pending part (never be appended).
             # Each final covers only its own segment, so finals accumulate once each.
             if is_final:
-                self.current_final_parts.append(transcript)
+                # Guard against Deepgram re-emitting the SAME final segment (it can send
+                # the segment again when speech_final/endpointing fires). Appending it a
+                # second time is exactly what produced the "last sentence shown twice"
+                # bug, so only append when it isn't an exact repeat of the last part.
+                if not self.current_final_parts or self.current_final_parts[-1] != transcript:
+                    self.current_final_parts.append(transcript)
                 display_text = " ".join(self.current_final_parts)
             else:
                 display_text = " ".join(self.current_final_parts + [transcript])
@@ -418,7 +497,7 @@ class DeepgramLiveTranscriptionService:
             is_new_segment = is_final and len(self.current_final_parts) == 1
 
             status = "FINAL" if is_final else "INTERIM"
-            logger.debug(f"[{status}] {transcript[:50]}... (source={self.current_source}, conf={confidence:.2f})")
+            logger.debug(f"[{status}] {transcript[:50]}... (source={self.source}, conf={confidence:.2f})")
 
             # Send to callback (full message text so the UI can render it directly)
             if self.on_transcript_callback:
@@ -427,7 +506,7 @@ class DeepgramLiveTranscriptionService:
                     "transcript": display_text,
                     "is_final": is_final,
                     "is_new_segment": is_new_segment,
-                    "source": self.current_source or "microphone",
+                    "source": self.source,
                     "confidence": confidence,
                     "message": self.current_message.to_dict() if self.current_message else None,
                     "total_messages": len(self.messages)
@@ -438,7 +517,7 @@ class DeepgramLiveTranscriptionService:
             if is_final and self._context_manager:
                 self._context_manager.add_transcript(
                     text=transcript,
-                    source=self.current_source or "microphone",
+                    source=self.source,
                     is_final=is_final,
                     message_id=str(self.current_message.message_id) if self.current_message else "",
                 )
@@ -494,6 +573,21 @@ class DeepgramLiveTranscriptionService:
         Run keyword/question detection on a final transcript segment.
         If triggered, build context and stream AI suggestion back to client.
         """
+        # If the other stream is already streaming an answer, skip this trigger so the
+        # two streams never produce interleaved AI output.
+        if self._ai_lock is not None and self._ai_lock.locked():
+            logger.debug(f"AI busy on the other stream, skipping trigger ({self.source})")
+            return
+
+        if self._ai_lock is not None:
+            await self._ai_lock.acquire()
+        try:
+            await self._run_detection_pipeline_inner(transcript)
+        finally:
+            if self._ai_lock is not None and self._ai_lock.locked():
+                self._ai_lock.release()
+
+    async def _run_detection_pipeline_inner(self, transcript: str):
         try:
             detection = self._keyword_detector.detect(transcript, is_final=True)
             
@@ -521,24 +615,46 @@ class DeepgramLiveTranscriptionService:
             
             logger.info(f"AI question to answer: '{question}'")
             
-            # Search RAG for relevant context (with timeout to avoid blocking LLM start)
+            # Search RAG + the user's experience concurrently (with a timeout so a slow
+            # vector store never delays the answer — real-time is the priority).
             rag_chunks = []
+            experience_chunks = []
+            memory_chunks = []
+            experience_searched = False
             try:
                 from services.rag_service import rag_service
-                rag_chunks = await asyncio.wait_for(
-                    rag_service.search(question, top_k=3),
-                    timeout=0.5
+                rag_task = rag_service.search(question, top_k=3, username=self.username)
+                exp_task = rag_service.search_experience(question, top_k=4, username=self.username)
+                mem_task = rag_service.search_user_memory(question, top_k=2, username=self.username or "")
+                experience_searched = True
+                rag_chunks, experience_chunks, memory_chunks = await asyncio.wait_for(
+                    asyncio.gather(rag_task, exp_task, mem_task, return_exceptions=True),
+                    timeout=0.8,
                 )
+                rag_chunks = rag_chunks if isinstance(rag_chunks, list) else []
+                experience_chunks = experience_chunks if isinstance(experience_chunks, list) else []
+                memory_chunks = memory_chunks if isinstance(memory_chunks, list) else []
             except asyncio.TimeoutError:
-                logger.debug("RAG search timed out (>500ms), skipping for latency")
+                logger.debug("RAG/experience search timed out (>800ms), skipping for latency")
             except Exception as e:
-                logger.debug(f"RAG search skipped: {e}")
-            
+                logger.debug(f"RAG/experience search skipped: {e}")
+
+            # Only ground the answer in experience matches that are actually relevant -
+            # a low-confidence match is worse than no match (it invites the model to
+            # stretch an unrelated bit of background into a fabricated answer).
+            experience_chunks = [
+                c for c in experience_chunks
+                if getattr(c, "score", 0.0) >= settings.RAG_EXPERIENCE_MIN_SCORE
+            ]
+
             # Build LLM context
             if self._context_manager:
                 context = self._context_manager.build_llm_context(
                     question=question,
                     rag_chunks=rag_chunks,
+                    experience_chunks=experience_chunks,
+                    memory_chunks=memory_chunks,
+                    experience_searched=experience_searched,
                 )
                 logger.info(
                     f"Context built - transcript_context length: {len(context.get('transcript_context', ''))}, "
@@ -554,43 +670,64 @@ class DeepgramLiveTranscriptionService:
                 }
                 logger.warning("No context manager available, using question only")
             
-            # Stream AI suggestion via callback
+            # Stream AI suggestion via callback. Sending on a client that has already
+            # disconnected mid-suggestion must never propagate out of this function -
+            # it would otherwise abort detection for the rest of this session.
             if self.on_ai_suggestion_callback:
-                await self.on_ai_suggestion_callback({
-                    "type": "ai.suggestion.start",
-                    "question": question,
-                    "detection": detection.to_dict(),
-                })
-                
+                try:
+                    await self.on_ai_suggestion_callback({
+                        "type": "ai.suggestion.start",
+                        "question": question,
+                        "detection": detection.to_dict(),
+                    })
+                except Exception as e:
+                    logger.warning(f"ai.suggestion.start callback failed (client likely disconnected): {e}")
+                    return
+
                 try:
                     from services.llm_router import llm_router, LLMMessage
-                    
+
                     messages = [LLMMessage(role="user", content=context["user_message"])]
-                    
+
                     logger.info(f"Sending to LLM - system_prompt: {context['system_prompt'][:100]}...")
                     logger.info(f"Sending to LLM - user_message: {context['user_message'][:200]}...")
-                    
+
                     async for token in llm_router.generate_stream(
                         messages,
                         system_prompt=context["system_prompt"],
                         max_tokens=700,
                         temperature=0.7,
                     ):
+                        try:
+                            await self.on_ai_suggestion_callback({
+                                "type": "ai.suggestion.token",
+                                "token": token,
+                            })
+                        except Exception as e:
+                            logger.warning(f"ai.suggestion.token callback failed, stopping stream: {e}")
+                            return
+
+                    from services.rag_service import confidence_from_chunks
+                    confidence = confidence_from_chunks(
+                        (experience_chunks or []) + (rag_chunks or [])
+                    )
+                    try:
                         await self.on_ai_suggestion_callback({
-                            "type": "ai.suggestion.token",
-                            "token": token,
+                            "type": "ai.suggestion.end",
+                            "confidence": confidence,
                         })
-                    
-                    await self.on_ai_suggestion_callback({
-                        "type": "ai.suggestion.end",
-                    })
-                    
+                    except Exception as e:
+                        logger.warning(f"ai.suggestion.end callback failed: {e}")
+
                 except Exception as e:
                     logger.error(f"AI suggestion streaming error: {e}")
-                    await self.on_ai_suggestion_callback({
-                        "type": "ai.suggestion.error",
-                        "error": str(e),
-                    })
+                    try:
+                        await self.on_ai_suggestion_callback({
+                            "type": "ai.suggestion.error",
+                            "error": str(e),
+                        })
+                    except Exception as callback_error:
+                        logger.warning(f"ai.suggestion.error callback failed: {callback_error}")
         
         except Exception as e:
             logger.error(f"Detection pipeline error: {e}")
@@ -600,17 +737,38 @@ class DeepgramLiveTranscriptionService:
         keyword_detector=None,
         context_manager=None,
         on_ai_suggestion=None,
+        ai_lock: Optional[asyncio.Lock] = None,
     ):
         """
         Enable the AI auto-trigger pipeline.
         Call after connect() to wire up keyword detection and AI suggestions.
+
+        ai_lock, when provided, is shared between the mic and speaker streams so only
+        one AI answer is generated at a time (prevents interleaved/duplicate answers).
         """
         self._keyword_detector = keyword_detector
         self._context_manager = context_manager
         self.on_ai_suggestion_callback = on_ai_suggestion
+        self._ai_lock = ai_lock
         self._ai_pipeline_enabled = True
-        logger.info("AI pipeline enabled on transcription service")
-    
+        logger.info(f"AI pipeline enabled on transcription service (source={self.source})")
+
+    async def cancel_ai(self) -> bool:
+        """Cancel an in-flight AI suggestion for this stream. Cancelling the task unwinds
+        _run_detection_pipeline's finally block, which releases the shared AI lock so the
+        next question can be answered immediately. Returns True if a task was cancelled."""
+        task = self.ai_task
+        if task is None or task.done():
+            return False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug(f"cancel_ai await error ({self.source}): {e}")
+        return True
+
     async def _handle_reconnect(self):
         """
         Handle reconnection on failure
@@ -667,6 +825,13 @@ class DeepgramLiveTranscriptionService:
                     await self.buffer_flush_task
                 except asyncio.CancelledError:
                     pass
+
+            if self.keepalive_task:
+                self.keepalive_task.cancel()
+                try:
+                    await self.keepalive_task
+                except asyncio.CancelledError:
+                    pass
             
             # Flush any remaining audio
             if self.audio_buffer and self.ws_client:
@@ -690,8 +855,6 @@ class DeepgramLiveTranscriptionService:
             # Reset tracking so reconnect starts fresh
             self.current_message = None
             self.current_final_parts = []
-            self.current_source = None
-            self.previous_source = None
             
             logger.info("Disconnected from Deepgram")
             
@@ -721,10 +884,208 @@ class DeepgramLiveTranscriptionService:
         self.messages = []
         self.current_message = None
         self.current_final_parts = []
-        self.message_counter = 0
-        self.current_source = None
-        self.previous_source = None
-        logger.info("Session reset")
+        self.message_counter = self.id_offset
+        logger.info(f"Session reset (source={self.source})")
+
+
+class DualDeepgramSession:
+    """
+    A single logical transcription session backed by TWO independent Deepgram
+    connections — one for the microphone and one for the speaker.
+
+    Why two connections? Sending both sources over one Deepgram stream interleaves
+    their audio (garbling fast/overlapping speech) and makes source attribution a
+    guess ("whatever chunk was last sent"). With one connection per source, each
+    stream carries clean mono audio and every transcript is reliably tagged with a
+    fixed source, so the UI can always place the mic on the right (blue) and the
+    speaker on the left (grey) without ever mixing them.
+
+    This class mirrors the public surface of DeepgramLiveTranscriptionService so the
+    route and session manager can treat it as a drop-in replacement.
+    """
+
+    # Large offset keeps speaker message IDs from ever colliding with mic IDs.
+    SPEAKER_ID_OFFSET = 1_000_000
+
+    # Echo-suppression tuning.
+    ECHO_WINDOW_SECONDS = 6.0   # how long a speaker final stays comparable
+    ECHO_SIMILARITY = 0.80      # similarity ratio above which mic text is an echo
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = settings.DEEPGRAM_MODEL,
+        language: str = settings.DEEPGRAM_LANGUAGE,
+        endpointing_ms: int = 300,
+        vad_events: bool = True,
+        username: Optional[str] = None,
+    ):
+        self.mic = DeepgramLiveTranscriptionService(
+            api_key=api_key,
+            model=model,
+            language=language,
+            endpointing_ms=endpointing_ms,
+            vad_events=vad_events,
+            source="microphone",
+            id_offset=0,
+            username=username,
+        )
+        self.speaker = DeepgramLiveTranscriptionService(
+            api_key=api_key,
+            model=model,
+            language=language,
+            endpointing_ms=endpointing_ms,
+            vad_events=vad_events,
+            source="speaker",
+            id_offset=self.SPEAKER_ID_OFFSET,
+            username=username,
+        )
+        # Shared so only one AI answer streams at a time across both streams.
+        self._ai_lock = asyncio.Lock()
+
+        # Recent speaker finals (normalized_text, timestamp) for echo comparison.
+        self._recent_speaker: List[Tuple[str, float]] = []
+        # Wire echo suppression: mic transcripts are checked against speaker finals.
+        self.mic._echo_check = self._is_echo
+        self.speaker._record_final = self._record_speaker_final
+
+    @staticmethod
+    def _normalize(text: str) -> str:
+        """Lowercase, strip punctuation, collapse whitespace for fuzzy comparison."""
+        text = (text or "").lower()
+        text = re.sub(r"[^\w\s]", "", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _record_speaker_final(self, text: str):
+        norm = self._normalize(text)
+        if not norm:
+            return
+        now = time.time()
+        self._recent_speaker.append((norm, now))
+        # Prune anything outside the comparison window.
+        cutoff = now - self.ECHO_WINDOW_SECONDS
+        self._recent_speaker = [(t, ts) for (t, ts) in self._recent_speaker if ts >= cutoff]
+
+    def _is_echo(self, text: str) -> bool:
+        norm = self._normalize(text)
+        if not norm:
+            return False
+        now = time.time()
+        cutoff = now - self.ECHO_WINDOW_SECONDS
+        for spoken, ts in self._recent_speaker:
+            if ts < cutoff:
+                continue
+            # Containment handles the common case where one side has the fuller
+            # utterance (e.g. mic caught a fragment of what the speaker said).
+            if norm in spoken or spoken in norm:
+                return True
+            if difflib.SequenceMatcher(None, norm, spoken).ratio() >= self.ECHO_SIMILARITY:
+                return True
+        return False
+
+    @property
+    def is_connected(self) -> bool:
+        return self.mic.is_connected or self.speaker.is_connected
+
+    async def connect(
+        self,
+        on_transcript: Callable,
+        on_error: Callable,
+        on_metadata: Optional[Callable] = None,
+    ) -> bool:
+        """Connect BOTH underlying streams. Both share the same callbacks; each
+        stamps its own fixed source so the client receives correctly-tagged data."""
+        # Open both Deepgram streams concurrently so total connect time is the slower of
+        # the two handshakes, not their sum (each is a separate network roundtrip).
+        results = await asyncio.gather(
+            self.mic.connect(on_transcript, on_error, on_metadata),
+            self.speaker.connect(on_transcript, on_error, on_metadata),
+            return_exceptions=True,
+        )
+        mic_ok = results[0] is True
+        spk_ok = results[1] is True
+        if isinstance(results[0], Exception):
+            logger.error(f"Mic stream connect error: {results[0]}")
+        if isinstance(results[1], Exception):
+            logger.warning(f"Speaker stream connect error: {results[1]}")
+        # Microphone is the essential stream; speaker is best-effort (loopback may be
+        # unavailable on some machines). Succeed as long as the mic connected.
+        if not mic_ok:
+            # Tear down whatever did connect to avoid leaks.
+            await self.disconnect()
+            return False
+        if not spk_ok:
+            logger.warning("Speaker stream failed to connect; continuing with microphone only")
+        return True
+
+    async def send_audio(self, audio_data: bytes, source: str = "microphone") -> bool:
+        """Route an audio chunk to the connection that owns its source."""
+        if source == "speaker":
+            return await self.speaker.send_audio(audio_data)
+        return await self.mic.send_audio(audio_data)
+
+    def enable_ai_pipeline(
+        self,
+        keyword_detector=None,
+        context_manager=None,
+        on_ai_suggestion=None,
+    ):
+        """Enable the AI pipeline on both streams, sharing one context manager and a
+        single lock so answers don't interleave between mic and speaker."""
+        self.mic.enable_ai_pipeline(
+            keyword_detector=keyword_detector,
+            context_manager=context_manager,
+            on_ai_suggestion=on_ai_suggestion,
+            ai_lock=self._ai_lock,
+        )
+        self.speaker.enable_ai_pipeline(
+            keyword_detector=keyword_detector,
+            context_manager=context_manager,
+            on_ai_suggestion=on_ai_suggestion,
+            ai_lock=self._ai_lock,
+        )
+
+    async def cancel_ai(self) -> bool:
+        """Cancel any in-flight AI suggestion on either stream (user hit Stop)."""
+        results = await asyncio.gather(
+            self.mic.cancel_ai(),
+            self.speaker.cancel_ai(),
+            return_exceptions=True,
+        )
+        return any(r is True for r in results)
+
+    def get_all_messages(self) -> List[Dict]:
+        """Merge both streams' messages, ordered by creation time."""
+        combined = list(self.mic.messages) + list(self.speaker.messages)
+        combined.sort(key=lambda m: m.created_at)
+        return [m.to_dict() for m in combined]
+
+    def get_current_message(self) -> Optional[Dict]:
+        if self.mic.current_message:
+            return self.mic.current_message.to_dict()
+        if self.speaker.current_message:
+            return self.speaker.current_message.to_dict()
+        return None
+
+    def finalize_current_message(self):
+        self.mic.finalize_current_message()
+        self.speaker.finalize_current_message()
+
+    def reset_session(self):
+        self.mic.reset_session()
+        self.speaker.reset_session()
+        self._recent_speaker.clear()
+
+    async def disconnect(self):
+        # Disconnect both; never let one failure prevent the other from cleaning up.
+        try:
+            await self.mic.disconnect()
+        except Exception as e:
+            logger.error(f"Mic disconnect error: {e}")
+        try:
+            await self.speaker.disconnect()
+        except Exception as e:
+            logger.error(f"Speaker disconnect error: {e}")
 
 
 class DeepgramSessionManager:
@@ -733,7 +1094,7 @@ class DeepgramSessionManager:
     """
     
     def __init__(self):
-        self._sessions: Dict[str, DeepgramLiveTranscriptionService] = {}
+        self._sessions: Dict[str, DualDeepgramSession] = {}
         logger.info("Initialized DeepgramSessionManager")
     
     async def create_session(
@@ -745,11 +1106,12 @@ class DeepgramSessionManager:
         model: str = settings.DEEPGRAM_MODEL,
         language: str = settings.DEEPGRAM_LANGUAGE,
         endpointing_ms: int = 300,
-        vad_events: bool = True
-    ) -> Optional[DeepgramLiveTranscriptionService]:
+        vad_events: bool = True,
+        username: Optional[str] = None,
+    ) -> Optional[DualDeepgramSession]:
         """
-        Create a new Deepgram Live session
-        
+        Create a new dual-stream Deepgram session (separate mic + speaker connections).
+
         Args:
             session_id: Unique session identifier
             on_transcript: Callback for transcript updates
@@ -759,17 +1121,19 @@ class DeepgramSessionManager:
             language: Language code
             endpointing_ms: Endpointing threshold in milliseconds
             vad_events: Enable VAD events
-            
+            username: Owning user, threaded down for per-user RAG/experience scoping
+
         Returns:
-            Service instance or None if creation failed
+            Session instance or None if creation failed
         """
         try:
-            service = DeepgramLiveTranscriptionService(
+            service = DualDeepgramSession(
                 api_key=api_key,
                 model=model,
                 language=language,
                 endpointing_ms=endpointing_ms,
-                vad_events=vad_events
+                vad_events=vad_events,
+                username=username,
             )
             
             connected = await service.connect(on_transcript, on_error)
@@ -785,7 +1149,7 @@ class DeepgramSessionManager:
             logger.exception(f"Session creation error: {e}")
             return None
     
-    def get_session(self, session_id: str) -> Optional[DeepgramLiveTranscriptionService]:
+    def get_session(self, session_id: str) -> Optional[DualDeepgramSession]:
         """Get an existing session"""
         return self._sessions.get(session_id)
     

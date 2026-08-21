@@ -2,6 +2,7 @@
 SnapEye AI - Main Application
 FastAPI application entry point
 """
+import asyncio
 import logging
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -15,7 +16,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from config import settings
 from api import routes_auth, routes_search, routes_realtime, routes_deepgram_live
-from api import routes_llm, routes_rag, routes_ocr
+from api import routes_llm, routes_rag, routes_ocr, routes_profile, routes_conversations
 from models import HealthResponse, ErrorResponse
 
 # Configure logging
@@ -70,7 +71,45 @@ async def lifespan(app: FastAPI):
         logger.info(f"LLM providers: {llm_router.available_providers}")
     except Exception as e:
         logger.warning(f"LLM router status: {e}")
-    
+
+    # Warm the primary LLM provider in the background so /health can start serving
+    # immediately (this must never block startup), while the first *real* user query
+    # doesn't pay the SDK's own one-time lazy-init cost (observed ~5s: SDK import,
+    # client construction, and internal setup that only happens on the first actual
+    # call). A single 1-token completion is the only reliable way to warm all of
+    # that - constructing the client alone left ~3s of latency on the first real call.
+    async def _warm_primary_provider():
+        try:
+            from services.llm_router import llm_router, LLMMessage
+            provider_name = llm_router.available_providers[0] if llm_router.available_providers else None
+            if not provider_name:
+                return
+            await llm_router.generate(
+                [LLMMessage(role="user", content="Hi")],
+                max_tokens=1,
+                provider=None,
+            )
+            logger.info(f"Warmed LLM provider: {provider_name}")
+        except Exception as e:
+            logger.debug(f"LLM provider warm-up skipped: {e}")
+
+    # Same idea for RAG: the first real query with use_profile=true triggers
+    # rag_service's lazy chromadb import + collection setup inside the request's
+    # 0.6s retrieval budget (see routes_llm.py), which can eat into that budget
+    # unnecessarily. Doing it once here means the first real query gets a fully
+    # warm vector store instead of racing a cold import against a timeout.
+    async def _warm_rag_service():
+        try:
+            from services.rag_service import rag_service
+            rag_service._ensure_initialized()
+            logger.info("Warmed RAG service (ChromaDB)")
+        except Exception as e:
+            logger.debug(f"RAG service warm-up skipped: {e}")
+
+    asyncio.create_task(_warm_rag_service())
+
+    asyncio.create_task(_warm_primary_provider())
+
     yield
     
     # Shutdown
@@ -237,6 +276,8 @@ app.include_router(routes_deepgram_live.router, prefix="/deepgram")
 app.include_router(routes_llm.router)
 app.include_router(routes_rag.router)
 app.include_router(routes_ocr.router)
+app.include_router(routes_profile.router)
+app.include_router(routes_conversations.router)
 
 
 # Root endpoint

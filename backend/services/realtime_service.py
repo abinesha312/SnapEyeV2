@@ -13,8 +13,6 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from deepgram import DeepgramClient
-
 from config import settings
 from security import SecurityManager
 
@@ -107,7 +105,10 @@ class DeepgramTranscriptionService:
         self.language = language
         self.pause_threshold = pause_threshold
         
-        # Initialize Deepgram client (v5 API)
+        # Initialize Deepgram client (v5 API). Deferred import: the deepgram-sdk
+        # import chain is expensive and should not happen at module import time -
+        # only when a real transcription service instance is created.
+        from deepgram import DeepgramClient
         self.deepgram = DeepgramClient(api_key=api_key)
         
         # Session state

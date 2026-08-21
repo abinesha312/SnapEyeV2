@@ -152,26 +152,62 @@
         </Grid>
         
         <!-- Transcription View -->
-        <ScrollViewer x:Name="TranscriptionView"
-                      Background="Transparent"
-                      VerticalScrollBarVisibility="Auto"
-                      HorizontalScrollBarVisibility="Disabled"
-                      PanningMode="VerticalOnly"
-                      CanContentScroll="False"
-                      PreviewMouseWheel="OuterScrollViewer_PreviewMouseWheel"
-                      Visibility="Collapsed"
-                      Padding="10,4">
-            <ScrollViewer.Resources>
-                <Style TargetType="ScrollBar" BasedOn="{StaticResource ContentScrollbar}"/>
-            </ScrollViewer.Resources>
-            
-            <StackPanel x:Name="TranscriptionPanel" Margin="0">
-                <TextBlock x:Name="TranscriptPlaceholder"
-                           Text="Start listening to see live transcription..."
-                           Foreground="#71717A" FontSize="11" FontStyle="Italic"
-                           FontFamily="Segoe UI"
-                           Margin="4,8" HorizontalAlignment="Center"/>
-            </StackPanel>
-        </ScrollViewer>
+        <Grid x:Name="TranscriptionViewRoot" Background="Transparent" Visibility="Collapsed">
+            <ScrollViewer x:Name="TranscriptionView"
+                          Background="Transparent"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled"
+                          PanningMode="VerticalOnly"
+                          CanContentScroll="False"
+                          PreviewMouseWheel="OuterScrollViewer_PreviewMouseWheel"
+                          Padding="10,4">
+                <ScrollViewer.Resources>
+                    <Style TargetType="ScrollBar" BasedOn="{StaticResource ContentScrollbar}"/>
+                </ScrollViewer.Resources>
+
+                <StackPanel x:Name="TranscriptionPanel" Margin="0">
+                    <TextBlock x:Name="TranscriptPlaceholder"
+                               Text="Start listening to see live transcription..."
+                               Foreground="#71717A" FontSize="11" FontStyle="Italic"
+                               FontFamily="Segoe UI"
+                               Margin="4,8" HorizontalAlignment="Center"/>
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- Floating "New ↓" pill: shown when the answer streams below the fold and the
+                 user isn't at the bottom. Lets them jump to the latest text on demand. -->
+            <Button x:Name="TranscriptJumpBtn"
+                    Visibility="Collapsed"
+                    Click="TranscriptJumpToLatest_Click"
+                    Cursor="Hand"
+                    HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                    Margin="0,0,0,12"
+                    Background="Transparent" BorderThickness="0" Padding="0">
+                <Button.Template>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="TranscriptJumpPill" CornerRadius="9999"
+                                Background="#2563EB" Padding="12,6"
+                                BorderBrush="#1D4ED8" BorderThickness="1">
+                            <Border.Effect>
+                                <DropShadowEffect Color="#000000" BlurRadius="14" ShadowDepth="2" Opacity="0.45"/>
+                            </Border.Effect>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="New" Foreground="White" FontSize="12" FontWeight="SemiBold" FontFamily="Segoe UI" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                <Viewbox Width="10" Height="10">
+                                    <Canvas Width="24" Height="24">
+                                        <Path Fill="White" Data="M12,16L6,10L7.41,8.59L12,13.17L16.59,8.59L18,10L12,16Z"/>
+                                    </Canvas>
+                                </Viewbox>
+                            </StackPanel>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="TranscriptJumpPill" Property="Background" Value="#1D4ED8"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Button.Template>
+            </Button>
+        </Grid>
     </Grid>
 </UserControl>

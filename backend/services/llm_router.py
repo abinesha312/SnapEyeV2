@@ -621,13 +621,19 @@ class LLMRouter:
             prov = self._providers[name]
             try:
                 logger.debug(f"Trying LLM provider: {name}")
-                result = await prov.generate(
-                    messages, max_tokens=max_tokens,
-                    temperature=temperature, system_prompt=system_prompt,
-                    model_override=model,
+                result = await asyncio.wait_for(
+                    prov.generate(
+                        messages, max_tokens=max_tokens,
+                        temperature=temperature, system_prompt=system_prompt,
+                        model_override=model,
+                    ),
+                    timeout=settings.LLM_PROVIDER_TIMEOUT_SECONDS,
                 )
                 logger.info(f"LLM response from {name}: {len(result)} chars")
                 return result
+            except asyncio.TimeoutError:
+                logger.warning(f"LLM provider {name} timed out after {settings.LLM_PROVIDER_TIMEOUT_SECONDS}s")
+                errors.append(f"{name}: timed out")
             except Exception as e:
                 logger.warning(f"LLM provider {name} failed: {e}")
                 errors.append(f"{name}: {e}")
@@ -671,18 +677,42 @@ class LLMRouter:
         if provider and provider in self._providers:
             order = [provider] + [p for p in order if p != provider]
 
+        # Responsiveness SLA: the first token must arrive within
+        # LLM_FIRST_TOKEN_TIMEOUT_SECONDS or the attempt is abandoned and the next
+        # one starts immediately. With multiple providers configured that means
+        # failover; with a single provider we retry it once with a fresh request
+        # (a stalled connection usually succeeds instantly on retry), so a
+        # transient stall costs ~3s, not the SDK's multi-minute default timeout.
+        attempts = order if len(order) > 1 else order * 2
+
         errors = []
-        for name in order:
+        for name in attempts:
             prov = self._providers[name]
             try:
                 logger.debug(f"Trying streaming LLM provider: {name}")
-                async for token in prov.generate_stream(
+                stream = prov.generate_stream(
                     messages, max_tokens=max_tokens,
                     temperature=temperature, system_prompt=system_prompt,
                     model_override=model,
-                ):
+                )
+                # Only bound the wait for the *first* token - once a stream has
+                # proven itself alive, let it run to completion unbounded.
+                try:
+                    first_token = await asyncio.wait_for(
+                        stream.__anext__(), timeout=settings.LLM_FIRST_TOKEN_TIMEOUT_SECONDS
+                    )
+                except StopAsyncIteration:
+                    return  # empty but successful stream
+                yield first_token
+                async for token in stream:
                     yield token
                 return  # success
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"LLM streaming provider {name} timed out waiting for first token "
+                    f"after {settings.LLM_FIRST_TOKEN_TIMEOUT_SECONDS}s"
+                )
+                errors.append(f"{name}: timed out")
             except Exception as e:
                 logger.warning(f"LLM streaming provider {name} failed: {e}")
                 errors.append(f"{name}: {e}")

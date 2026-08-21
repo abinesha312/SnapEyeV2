@@ -31,12 +31,33 @@ class LoginRequest(BaseModel):
     """User login request"""
     username: str = Field(..., min_length=3, max_length=50)
     api_key: str = Field(..., min_length=10)
-    
+
     class Config:
         json_schema_extra = {
             "example": {
                 "username": "user123",
                 "api_key": "sk-..."
+            }
+        }
+
+
+class AppendMessageRequest(BaseModel):
+    """A single chat bubble (text, voice, OCR, quick-action, or assistant answer) to
+    append to the caller's active conversation."""
+    kind: str = Field(..., description="UserTyped, UserSpoken, OtherSpoken, AssistantAnswer, or QuickAction")
+    text: str = Field(..., min_length=1)
+    label: Optional[str] = None
+    confidence: Optional[float] = Field(None, ge=0, le=1)
+    client_message_id: Optional[str] = Field(
+        None, description="Client-generated id; re-sending the same id updates the row instead of duplicating it"
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "kind": "UserTyped",
+                "text": "What should I say next?",
+                "client_message_id": "a1b2c3d4"
             }
         }
 
@@ -142,7 +163,7 @@ class SearchResponse(BaseModel):
                 "success": True,
                 "result": "Artificial intelligence is...",
                 "timestamp": "2024-01-01T00:00:00",
-                "model": "gpt-4o",
+                "model": "claude-haiku-4-5-20251001",
                 "search_type": "text",
                 "metadata": {
                     "tokens_used": 150,

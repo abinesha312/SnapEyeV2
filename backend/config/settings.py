@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     
     # Anthropic Configuration
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
-    ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
+    ANTHROPIC_MODEL: str = "claude-haiku-4-5-20251001"
 
     # Google Gemini Configuration (server-side default; per-request override supported)
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
@@ -102,18 +102,46 @@ class Settings(BaseSettings):
     TESSERACT_CMD: str = os.getenv("TESSERACT_CMD", "")
 
     # LLM Router Configuration
-    LLM_PRIMARY_PROVIDER: str = "openai"  # "openai", "anthropic", "gemini", or "grok"
-    LLM_FALLBACK_PROVIDER: str = "anthropic"  # fallback when primary fails
+    LLM_PRIMARY_PROVIDER: str = "anthropic"  # "openai", "anthropic", "gemini", or "grok"
+    LLM_FALLBACK_PROVIDER: str = "openai"  # fallback when primary fails
     LLM_STREAM_ENABLED: bool = True
     LLM_MAX_TOKENS: int = 4096
     LLM_TEMPERATURE: float = 0.7
+    # Per-provider request timeout for the failover loop, in seconds. Bounds how long
+    # a hung/unresponsive provider can stall before we move to the next one, instead
+    # of relying on the SDK's own (often much longer) default timeout. Applies to
+    # NON-streaming (full-response) calls, where the whole answer takes this long.
+    LLM_PROVIDER_TIMEOUT_SECONDS: float = 20.0
+    # Hard budget for the FIRST streamed token, in seconds - the user-facing
+    # responsiveness SLA. Normal first-token latency is ~0.5s; if a provider hasn't
+    # produced anything by this deadline the attempt is abandoned and retried/failed-
+    # over immediately rather than leaving the user staring at a spinner.
+    LLM_FIRST_TOKEN_TIMEOUT_SECONDS: float = 3.0
     
     # RAG Configuration
     RAG_CHUNK_SIZE: int = 500  # tokens per chunk
     RAG_CHUNK_OVERLAP: int = 50  # overlap between chunks
     RAG_TOP_K: int = 5  # number of results to retrieve
-    RAG_DATA_DIR: str = "./data/chromadb"
-    
+    RAG_DATA_DIR: str = "./data/chromadb"  # used only when CHROMA_HOST is empty (embedded mode)
+    # When set, rag_service connects to a standalone ChromaDB server (e.g. the
+    # "chromadb" container in podman-compose.yml) via HttpClient instead of an
+    # embedded PersistentClient. Empty by default so local dev without Podman
+    # still works out of the box.
+    CHROMA_HOST: str = os.getenv("CHROMA_HOST", "")
+    CHROMA_PORT: int = int(os.getenv("CHROMA_PORT", "8000"))
+    # Minimum cosine-similarity score (0..1) an experience match must clear before it's
+    # used to ground an answer. Below this, the assistant falls back to general
+    # knowledge instead of stretching a weak match into a fabricated claim.
+    #
+    # Calibrated empirically against OpenAI text-embedding-3-small, whose cosine
+    # similarities run much lower than a naive 0..1 scale suggests: an unrelated query
+    # ("chocolate cake recipe" vs. a Kafka/backend-engineer entry) scored ~0.01, a
+    # genuinely relevant but keyword-free query ("distributed streaming systems" vs.
+    # the same "Kafka event pipeline" entry) scored ~0.36, and a close/direct match
+    # scored ~0.60. A 0.55 threshold would have wrongly discarded the second (clearly
+    # relevant) case, so this sits well below "close match" but well above "noise".
+    RAG_EXPERIENCE_MIN_SCORE: float = 0.20
+
     # Context Management
     CONTEXT_MAX_TOKENS: int = 100000  # rolling window size
     CONTEXT_SUMMARY_THRESHOLD: int = 80000  # summarize when exceeded

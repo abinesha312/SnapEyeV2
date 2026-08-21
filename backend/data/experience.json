@@ -1,0 +1,22 @@
+[
+  {
+    "entry_id": "0d151ab0-aaae-4aa5-be4c-6681b0573cec",
+    "company": "EXL service",
+    "role": "Lead Assistant Manager",
+    "start_date": "Dec-2025",
+    "end_date": "Present",
+    "summary": "• Architected fully autonomous LLM agent workflows for healthcare systems using FastAPI with a three-tier fail-safe architecture, achieving 99.9% uptime across distributed microservices on Google Kubernetes Engine (GKE).\r\n• Orchestrated end-to-end workflow automation with Apache Airflow DAGs, integrating Big-Query for business intelligence and Google Cloud Redis for sub-300ms inference latency, processing large-scale workloads (20GB+ per request) with real-time monitoring via JIRA dashboards.\r\n• Deployed AI agents with automated task tracking and error recovery, reducing manual intervention by 85% while maintaining built-in compliance and audit trails for healthcare workflows.\r\n• Built RAG-based agentic applications using MCP servers, LangChain, LlamaIndex, and LangGraph, containerized with Docker and orchestrated on GKE for high-availability enterprise conversational interfaces.\r\n• Conducted ad-hoc statistical analyses on pipeline performance data, working closely with data engineers to generate business intelligence dashboards for stakeholders.",
+    "entry_type": "work",
+    "updated_at": "2026-07-05T05:47:47.267394"
+  },
+  {
+    "entry_id": "8be5cd58-1249-42d1-9f37-923f080fdd71",
+    "company": "Turing ",
+    "role": "LLM Engineer",
+    "start_date": "Sep-2025",
+    "end_date": "Feb-2026",
+    "summary": "• Designed LLM fine-tuning workflows with automated fairness evaluation, improving labeling consistency by 25% and reducing annotation errors by 30%.\r\n• Orchestrated multi-modal LLM/LMM training pipelines using PyTorch and HuggingFace Transformers, implementing instruction tuning and alignment protocols to reduce harmful outputs by 35%.",
+    "entry_type": "work",
+    "updated_at": "2026-07-05T05:50:36.572198"
+  }
+]

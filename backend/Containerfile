@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# tesseract-ocr is required in-image: TESSERACT_CMD's Windows auto-detection
+# (see services/ocr_service.py) won't find a binary inside a Linux container.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=utf-8 \
+    TESSERACT_CMD=/usr/bin/tesseract
+
+EXPOSE 8080
+
+CMD ["python", "run_server.py"]

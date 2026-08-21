@@ -32,6 +32,9 @@ namespace SnapEye.Services
         /// <summary>Fired on error.</summary>
         public event EventHandler<string>? ErrorOccurred;
 
+        /// <summary>Fired when the backend reports a confidence score (0..1) for the answer.</summary>
+        public event EventHandler<double>? ConfidenceReceived;
+
         public bool IsStreaming { get; private set; }
 
         public StreamingResponseService(string backendUrl)
@@ -88,7 +91,11 @@ namespace SnapEye.Services
             string ragContext = "",
             string screenContext = "",
             string? systemPrompt = null,
-            string? provider = null)
+            string? provider = null,
+            string jobDescription = "",
+            string company = "",
+            string role = "",
+            string mode = "")
         {
             var (activeProvider, activeModel, activeKey) = ResolveAiCredentials(provider);
 
@@ -102,6 +109,11 @@ namespace SnapEye.Services
                 provider = activeProvider,
                 model = activeModel,
                 api_key = activeKey,
+                use_profile = true,
+                job_description = jobDescription,
+                company = company,
+                role = role,
+                mode = mode,
             };
 
             await StreamFromEndpointAsync("/api/llm/context-stream", payload).ConfigureAwait(false);
@@ -225,6 +237,13 @@ namespace SnapEye.Services
                                         full = fullRespElement.GetString() ?? fullResponseBuilder.ToString();
                                     else
                                         full = fullResponseBuilder.ToString();
+
+                                    if (root.TryGetProperty("confidence", out var confElement)
+                                        && confElement.ValueKind == JsonValueKind.Number)
+                                    {
+                                        ConfidenceReceived?.Invoke(this, confElement.GetDouble());
+                                    }
+
                                     endEventSent = true;
                                     ResponseComplete?.Invoke(this, full);
                                 }

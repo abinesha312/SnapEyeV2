@@ -9,6 +9,7 @@ import base64
 import json
 import logging
 import uuid
+import asyncio
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
@@ -49,15 +50,22 @@ async def live_transcribe(
         await websocket.accept()
         session_id = f"{user_data.get('sub')}_{uuid.uuid4().hex}"
 
+        # Two Deepgram streams (mic + speaker) each have a receive loop; serialize sends.
+        send_lock = asyncio.Lock()
+
+        async def safe_send(payload: dict):
+            async with send_lock:
+                await websocket.send_json(payload)
+
         async def on_transcript(result):
             try:
-                await websocket.send_json(result)
+                await safe_send(result)
             except Exception as e:
                 logger.error("Send error: %s", e)
 
         async def on_error(error_msg):
             try:
-                await websocket.send_json({"type": "error", "error": error_msg})
+                await safe_send({"type": "error", "error": error_msg})
             except Exception as e:
                 logger.error("Error send failed: %s", e)
 
@@ -70,10 +78,11 @@ async def live_transcribe(
             language=language,
             endpointing_ms=endpointing_ms,
             vad_events=True,
+            username=user_data.get("sub"),
         )
 
         if not deepgram_service:
-            await websocket.send_json({"type": "error", "error": "Session creation failed"})
+            await safe_send({"type": "error", "error": "Session creation failed"})
             return
 
         context_mgr = context_session_manager.get_or_create(session_id)
@@ -82,7 +91,7 @@ async def live_transcribe(
 
             async def on_ai_suggestion(msg):
                 try:
-                    await websocket.send_json(msg)
+                    await safe_send(msg)
                 except Exception as e:
                     logger.error("AI suggestion send error: %s", e)
 
@@ -94,7 +103,7 @@ async def live_transcribe(
         except Exception as e:
             logger.warning("AI pipeline setup skipped: %s", e)
 
-        await websocket.send_json(
+        await safe_send(
             {
                 "type": "session.created",
                 "session_id": session_id,
@@ -125,7 +134,7 @@ async def live_transcribe(
 
                 elif message.get("action") == "get_messages":
                     messages = deepgram_service.get_all_messages()
-                    await websocket.send_json(
+                    await safe_send(
                         {
                             "type": "session.messages",
                             "messages": messages,
@@ -135,12 +144,12 @@ async def live_transcribe(
 
                 elif message.get("action") == "reset":
                     deepgram_service.reset_session()
-                    await websocket.send_json({"type": "session.reset", "status": "ok"})
+                    await safe_send({"type": "session.reset", "status": "ok"})
 
                 elif message.get("action") == "finalize":
                     deepgram_service.finalize_current_message()
                     current_msg = deepgram_service.get_current_message()
-                    await websocket.send_json(
+                    await safe_send(
                         {"type": "message.finalized", "message": current_msg}
                     )
 
@@ -149,7 +158,7 @@ async def live_transcribe(
                     text = (raw or "")[:12000]
                     if context_mgr:
                         context_mgr.set_screen_context(text)
-                    await websocket.send_json(
+                    await safe_send(
                         {"type": "screen_context.ack", "length": len(text), "status": "ok"}
                     )
 

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from config import settings
 from security import auth_handler
 from services.llm_router import (
     llm_router,
@@ -55,7 +56,7 @@ class LLMRequest(BaseModel):
 
 
 class ContextLLMRequest(BaseModel):
-    """Request body for context-aware LLM generation (used by auto-trigger pipeline)."""
+    """Request body for context-aware LLM generation (used by manual chat / quick actions)."""
     question: str = Field(..., description="Detected question from transcript")
     transcript_context: str = Field(default="", description="Rolling transcript window")
     rag_context: str = Field(default="", description="Retrieved RAG chunks")
@@ -64,6 +65,12 @@ class ContextLLMRequest(BaseModel):
     provider: Optional[str] = Field(default=None)
     model: Optional[str] = Field(default=None)
     api_key: Optional[str] = Field(default=None)
+    # Experience RAG + interview tailoring (grounding is retrieved server-side).
+    use_profile: bool = Field(default=True, description="Ground the answer in the user's saved experience")
+    job_description: str = Field(default="", description="Target job description (interview mode)")
+    company: str = Field(default="", description="Target company (interview mode)")
+    role: str = Field(default="", description="Target role (interview mode)")
+    mode: str = Field(default="", description="Active assistant mode id")
 
 
 class TestConnectionRequest(BaseModel):
@@ -135,8 +142,45 @@ async def context_stream_llm(
     request: ContextLLMRequest,
     user_data=Depends(auth_handler.verify_auth),
 ):
-    """Stream a context-aware LLM response for the auto-trigger pipeline."""
-    system_prompt = request.system_prompt or _build_assistant_system_prompt()
+    """Stream a context-aware LLM response grounded in the user's saved experience."""
+    is_interview = bool(request.job_description) or "interview" in (request.mode or "").lower()
+
+    # Retrieve the user's most relevant experience (and knowledge base) in real time.
+    # Bounded so a slow vector store never stalls the answer.
+    experience_chunks = []
+    kb_chunks = []
+    memory_chunks = []
+    if request.use_profile:
+        try:
+            import asyncio
+            from services.rag_service import rag_service
+            username = user_data.get("sub")
+            exp_task = rag_service.search_experience(request.question, top_k=3, username=username)
+            kb_task = rag_service.search(request.question, top_k=2, username=username)
+            mem_task = rag_service.search_user_memory(request.question, username=username or "", top_k=2)
+            experience_chunks, kb_chunks, memory_chunks = await asyncio.wait_for(
+                asyncio.gather(exp_task, kb_task, mem_task, return_exceptions=True),
+                timeout=0.6,
+            )
+            experience_chunks = experience_chunks if isinstance(experience_chunks, list) else []
+            kb_chunks = kb_chunks if isinstance(kb_chunks, list) else []
+            memory_chunks = memory_chunks if isinstance(memory_chunks, list) else []
+            # Only ground answers in experience matches that clear a minimum relevance
+            # bar - a weak match invites the model to fabricate a connection rather
+            # than answering from general knowledge.
+            experience_chunks = [
+                c for c in experience_chunks
+                if getattr(c, "score", 0.0) >= settings.RAG_EXPERIENCE_MIN_SCORE
+            ]
+        except Exception as e:
+            logger.debug(f"Profile retrieval skipped: {e}")
+
+    from services.rag_service import confidence_from_chunks
+    confidence = confidence_from_chunks(list(experience_chunks) + list(kb_chunks) + list(memory_chunks))
+
+    # Always apply the grounding/human-answer rules, and strictly prepend the selected mode's
+    # template (sent by the client as system_prompt) so the chosen mode governs every query.
+    system_prompt = _build_assistant_system_prompt(is_interview, mode_prompt=request.system_prompt)
 
     # Build the user message from all contexts
     user_content = _build_context_message(
@@ -144,6 +188,14 @@ async def context_stream_llm(
         transcript=request.transcript_context,
         rag=request.rag_context,
         screen=request.screen_context,
+        experience_chunks=experience_chunks,
+        kb_chunks=kb_chunks,
+        memory_chunks=memory_chunks,
+        job_description=request.job_description,
+        company=request.company,
+        role=request.role,
+        is_interview=is_interview,
+        experience_searched=request.use_profile,
     )
     messages = [LLMMessage(role="user", content=user_content)]
 
@@ -155,6 +207,7 @@ async def context_stream_llm(
             api_key=request.api_key,
             model=request.model,
             user_sub=user_data.get("sub"),
+            confidence=confidence,
         ),
         media_type="text/event-stream",
         headers={
@@ -213,6 +266,7 @@ async def _stream_tokens(
     api_key: Optional[str] = None,
     model: Optional[str] = None,
     user_sub: Optional[str] = None,
+    confidence: Optional[float] = None,
 ):
     """Yield SSE-formatted token events."""
     try:
@@ -237,7 +291,10 @@ async def _stream_tokens(
             full_response += token
             yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
 
-        yield f"data: {json.dumps({'type': 'end', 'full_response': full_response})}\n\n"
+        end_payload = {'type': 'end', 'full_response': full_response}
+        if confidence is not None:
+            end_payload['confidence'] = confidence
+        yield f"data: {json.dumps(end_payload)}\n\n"
 
     except NoProviderConfiguredError as e:
         payload = {"type": "error", "code": "no_ai_configured", "error": str(e)}
@@ -249,22 +306,43 @@ async def _stream_tokens(
         yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
 
 
-def _build_assistant_system_prompt() -> str:
-    """Build the default system prompt for the AI meeting assistant."""
-    return (
-        "You are SnapEye, an intelligent real-time meeting assistant. "
-        "You help users during live conversations by providing relevant answers, "
-        "suggestions, and insights based on the ongoing transcript.\n\n"
-        "CRITICAL RULES:\n"
-        "- You HAVE access to the conversation transcript. It is provided in the user message.\n"
-        "- NEVER say you don't have access to previous conversations. You DO.\n"
-        "- NEVER say you need more context if a transcript is provided. USE the transcript.\n"
-        "- Be concise and actionable. The user is in a live meeting.\n"
-        "- Answer directly first, then elaborate briefly if needed.\n"
-        "- Use bullet points and markdown for readability.\n"
-        "- Keep responses under 200 words.\n"
-        "- Do NOT use large headings (## or #). Use **bold** for emphasis instead."
+def _build_assistant_system_prompt(is_interview: bool = False, mode_prompt: str = "") -> str:
+    """Build the default system prompt: a human, first-person, story-driven assistant.
+
+    When ``mode_prompt`` (the client's selected-mode template) is supplied it is strictly
+    prepended so the active mode governs the answer, on top of the grounding rules below.
+    """
+    base = (
+        "You are SnapEye, a real-time assistant that speaks AS the user (first person, \"I\"). "
+        "You HAVE access to the conversation transcript and the user's real background provided "
+        "in the user message. Never say you lack access.\n\n"
+        "When the question is about the user's experience, answer like a real person telling "
+        "their story: set the situation and the real challenge, explain what YOU did (the workflow "
+        "you designed and the technical architecture, tools, and key decisions), share the human "
+        "side (what was hard, what you learned), and finish with the outcome and the value it "
+        "added to the business or organization.\n"
+        "RULES:\n"
+        "- Answer the actual question directly first; stay strictly on-topic.\n"
+        "- Be concrete and practical — specific steps, tools, numbers — no filler or padding.\n"
+        "- If the detected question is garbled or ambiguous, answer the most likely intent from "
+        "the transcript instead of guessing wildly or asking for clarification.\n"
+        "- Ground every claim in the background/context provided; never invent facts. If something "
+        "isn't in my background or the context, say so briefly rather than fabricating.\n"
+        "- Sound warm, natural, and confident — reflective, not a robotic bullet dump.\n"
+        "- Keep responses under ~220 words.\n"
+        "- Use light markdown (**bold**, short paragraphs). No large headings (## or #)."
     )
+    if is_interview:
+        base += (
+            "\n\nINTERVIEW MODE: Follow the ACTIVE MODE instructions above. Present me as a "
+            "strong, likeable candidate while staying truthful to my real experience."
+        )
+    if mode_prompt and mode_prompt.strip():
+        base = (
+            "ACTIVE MODE (follow these instructions strictly):\n"
+            f"{mode_prompt.strip()}\n\n" + base
+        )
+    return base
 
 
 def _build_context_message(
@@ -272,9 +350,68 @@ def _build_context_message(
     transcript: str = "",
     rag: str = "",
     screen: str = "",
+    experience_chunks: Optional[List] = None,
+    kb_chunks: Optional[List] = None,
+    memory_chunks: Optional[List] = None,
+    job_description: str = "",
+    company: str = "",
+    role: str = "",
+    is_interview: bool = False,
+    experience_searched: bool = False,
 ) -> str:
     """Build the user message combining all available context."""
-    parts = [f"**Detected Question:** {question}"]
+    parts = [f"**Question:** {question}"]
+
+    if experience_chunks:
+        exp_lines = []
+        for c in experience_chunks[:5]:
+            meta = getattr(c, "metadata", None) or {}
+            text = c.text if hasattr(c, "text") else str(c)
+            role_c = meta.get("role", "")
+            company_c = meta.get("company", "")
+            period = ""
+            if meta.get("start_date") or meta.get("end_date"):
+                period = f" ({meta.get('start_date', '?')} - {meta.get('end_date', 'Present')})"
+            header_bits = [b for b in [role_c, company_c] if b]
+            header = " at ".join(header_bits) + period if header_bits else "Experience"
+            body = meta.get("summary") or text
+            exp_lines.append(f"- {header}:\n  {body}")
+        parts.append(
+            "\n**My Relevant Background (answer in first person from this — my real experience):**\n"
+            + "\n".join(exp_lines)
+        )
+    elif experience_searched and not experience_chunks:
+        parts.append(
+            "\n**Background note:** No experience entry matched this question closely. "
+            "Do NOT invent prior roles, projects, or employers — answer from general knowledge "
+            "or say briefly you don't have a matching example in your background."
+        )
+
+    if memory_chunks:
+        mem_lines = []
+        for c in memory_chunks[:3]:
+            text = c.text if hasattr(c, "text") else str(c)
+            mem_lines.append(f"- {text}")
+        parts.append(
+            "\n**Relevant Past Conversation (same user):**\n" + "\n".join(mem_lines)
+        )
+
+    if is_interview and job_description:
+        target = ""
+        if role or company:
+            target = f" (target role: {role} at {company})"
+        parts.append(
+            f"\n**Target Job Description{target}:**\n```\n{job_description[:3000]}\n```"
+            "\nTailor the answer to the skills, tools, and standards this role expects."
+        )
+
+    if kb_chunks:
+        kb_lines = []
+        for i, c in enumerate(kb_chunks[:5]):
+            text = c.text if hasattr(c, "text") else str(c)
+            score = c.score if hasattr(c, "score") else 0.0
+            kb_lines.append(f"[Source {i+1}, relevance: {score:.2f}]\n{text}")
+        parts.append("\n**Relevant Knowledge Base:**\n" + "\n\n".join(kb_lines))
 
     if transcript:
         parts.append(
@@ -283,7 +420,7 @@ def _build_context_message(
 
     if rag:
         parts.append(
-            f"\n**Relevant Knowledge Base Context:**\n{rag}"
+            f"\n**Additional Knowledge Base Context:**\n{rag}"
         )
 
     if screen:
@@ -292,8 +429,8 @@ def _build_context_message(
         )
 
     parts.append(
-        "\nPlease provide a helpful, concise answer to the detected question "
-        "using the context above."
+        "\nAnswer the question using my background and the context above. If my background is "
+        "relevant, answer in the first person about what I actually did."
     )
 
     return "\n".join(parts)

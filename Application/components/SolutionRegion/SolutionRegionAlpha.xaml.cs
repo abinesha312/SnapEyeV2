@@ -65,6 +65,11 @@ namespace SnapEye.SolutionRegion
 
         // Chat sticky-bottom
         private bool chatStickyBottom = true;
+        // Transcript view auto-follow. Live transcription follows the newest line only while
+        // the user is already at the bottom; once they scroll up they stay put. Streaming AI
+        // answers never auto-scroll (the answer stays anchored where it began so the user can
+        // read/scroll freely during generation).
+        private bool transcriptStickyBottom = true;
 
         // Force-new-bubble after this much silence on the same source. Below this gap,
         // consecutive same-speaker utterances are merged into the same bubble so a brief
@@ -101,6 +106,10 @@ namespace SnapEye.SolutionRegion
                     ChatView.SizeChanged += (_, e) => UpdateChatBubbleMaxWidth(e.NewSize.Width);
                     ChatView.ScrollChanged += ChatView_ScrollChanged;
                 }
+                if (TranscriptionView != null)
+                {
+                    TranscriptionView.ScrollChanged += TranscriptionView_ScrollChanged;
+                }
             };
         }
 
@@ -122,7 +131,7 @@ namespace SnapEye.SolutionRegion
             SafeInvoke(() =>
             {
                 ChatViewRoot.Visibility = Visibility.Visible;
-                TranscriptionView.Visibility = Visibility.Collapsed;
+                TranscriptionViewRoot.Visibility = Visibility.Collapsed;
             });
         }
 
@@ -131,7 +140,7 @@ namespace SnapEye.SolutionRegion
             SafeInvoke(() =>
             {
                 ChatViewRoot.Visibility = Visibility.Collapsed;
-                TranscriptionView.Visibility = Visibility.Visible;
+                TranscriptionViewRoot.Visibility = Visibility.Visible;
             });
         }
 
@@ -331,7 +340,7 @@ namespace SnapEye.SolutionRegion
             };
         }
 
-        public void EndStreamingResponse(string? fullResponse = null)
+        public void EndStreamingResponse(string? fullResponse = null, double? confidence = null)
         {
             SafeInvoke(() =>
             {
@@ -345,7 +354,20 @@ namespace SnapEye.SolutionRegion
                 // Swap the live plain-text body for a fully-rendered markdown view so
                 // code blocks, **bold**, lists etc. display correctly in the final answer.
                 if (currentStreamingCard != null && !string.IsNullOrWhiteSpace(finalText))
-                    currentStreamingCard.Child = BuildAnswerContent(finalText, out _);
+                {
+                    var content = BuildAnswerContent(finalText, out _);
+                    if (confidence.HasValue)
+                    {
+                        var stack = new StackPanel();
+                        stack.Children.Add(content);
+                        stack.Children.Add(BuildConfidenceBadge(confidence.Value));
+                        currentStreamingCard.Child = stack;
+                    }
+                    else
+                    {
+                        currentStreamingCard.Child = content;
+                    }
+                }
                 else if (currentStreamingTextBlock != null)
                     currentStreamingTextBlock.Text = finalText;
 
@@ -409,7 +431,8 @@ namespace SnapEye.SolutionRegion
             {
                 Console.WriteLine($"[SolutionRegion] stream flush error: {ex.Message}");
             }
-            MaybeAutoScroll();
+            // No auto-scroll during generation: the answer stays anchored where it began so
+            // the user can read and scroll freely. The "New" pill lets them jump to the latest.
         }
 
         #endregion
@@ -462,6 +485,46 @@ namespace SnapEye.SolutionRegion
             grid.Children.Add(accent);
             grid.Children.Add(viewer);
             return grid;
+        }
+
+        /// <summary>
+        /// Small pill showing the backend-reported answer confidence (0..1). Grounded,
+        /// high-confidence answers render green; softer ones amber.
+        /// </summary>
+        private static Border BuildConfidenceBadge(double confidence)
+        {
+            int pct = (int)Math.Round(Math.Max(0.0, Math.Min(1.0, confidence)) * 100.0);
+            Color fill, edge, text;
+            if (confidence >= 0.85)
+            {
+                fill = Color.FromRgb(0x1B, 0x3A, 0x2A); edge = Color.FromRgb(0x2E, 0x7D, 0x54); text = Color.FromRgb(0x86, 0xEF, 0xAC);
+            }
+            else if (confidence >= 0.7)
+            {
+                fill = Color.FromRgb(0x3A, 0x33, 0x1B); edge = Color.FromRgb(0x8A, 0x6D, 0x2E); text = Color.FromRgb(0xFD, 0xE0, 0x47);
+            }
+            else
+            {
+                fill = Color.FromRgb(0x2A, 0x2A, 0x33); edge = Color.FromRgb(0x55, 0x55, 0x63); text = Color.FromRgb(0xC7, 0xC3, 0xD1);
+            }
+
+            return new Border
+            {
+                Background = new SolidColorBrush(fill),
+                BorderBrush = new SolidColorBrush(edge),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(999),
+                Padding = new Thickness(8, 2, 8, 2),
+                Margin = new Thickness(0, 8, 0, 0),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Child = new TextBlock
+                {
+                    Text = $"Confidence {pct}%",
+                    FontSize = 10.5,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = new SolidColorBrush(text),
+                }
+            };
         }
 
         // ── Markdown code theme ────────────────────────────────────────────────────────
@@ -583,16 +646,24 @@ namespace SnapEye.SolutionRegion
                 if (atBottom) HideJumpToLatest();
             }
 
-            // New content arrived and user is not at bottom → show jump button.
-            if (e.ExtentHeightChange > 0.5 && !chatStickyBottom)
-                ShowJumpToLatest();
-            else if (atBottom)
-                HideJumpToLatest();
+            // New content arrived. While streaming we never auto-follow (frozen), so if the
+            // fresh text pushed the bottom out of view, surface the jump button.
+            if (e.ExtentHeightChange > 0.5)
+            {
+                bool following = !isStreamingResponse && chatStickyBottom;
+                if (!following && !atBottom)
+                    ShowJumpToLatest();
+                else if (atBottom)
+                    HideJumpToLatest();
+            }
         }
 
         private void MaybeAutoScroll()
         {
             if (ChatView == null) return;
+            // Frozen while a response streams: the view stays where it was when the answer
+            // started and the user scrolls freely (the jump pill opts back into the latest).
+            if (isStreamingResponse) return;
             if (chatStickyBottom)
             {
                 ChatView.Dispatcher.BeginInvoke(new Action(() => ChatView.ScrollToEnd()), DispatcherPriority.Background);
@@ -609,6 +680,89 @@ namespace SnapEye.SolutionRegion
             chatStickyBottom = true;
             ChatView?.ScrollToEnd();
             HideJumpToLatest();
+        }
+
+        /// <summary>
+        /// Tracks whether the transcript view is pinned to the bottom. A user-initiated
+        /// scroll up releases the pin so live transcription / answers no longer yank the
+        /// viewport; scrolling back to the bottom re-enables follow.
+        /// </summary>
+        private void TranscriptionView_ScrollChanged(object sender, ScrollChangedEventArgs e)
+        {
+            if (TranscriptionView == null) return;
+            double distanceFromBottom = TranscriptionView.ScrollableHeight - TranscriptionView.VerticalOffset;
+            bool atBottom = distanceFromBottom < 24;
+
+            // User-initiated scroll (offset moved without the extent growing).
+            if (Math.Abs(e.VerticalChange) > 0.5 && Math.Abs(e.ExtentHeightChange) < 0.5)
+            {
+                transcriptStickyBottom = atBottom;
+                if (atBottom) HideTranscriptJump();
+            }
+
+            // New content arrived. While an answer streams we freeze the viewport, so show the
+            // jump button when the newest text is below the fold.
+            if (e.ExtentHeightChange > 0.5)
+            {
+                bool following = !isTranscriptStreaming && transcriptStickyBottom;
+                if (!following && !atBottom)
+                    ShowTranscriptJump();
+                else if (atBottom)
+                    HideTranscriptJump();
+            }
+        }
+
+        /// <summary>
+        /// Follows the newest transcript content only while the user is at the bottom AND no
+        /// answer is streaming. During streaming the view is frozen so the user reads/scrolls
+        /// freely; the jump pill lets them opt back into the latest.
+        /// </summary>
+        private void MaybeAutoScrollTranscript()
+        {
+            if (TranscriptionView == null) return;
+            if (isTranscriptStreaming) return;
+            if (transcriptStickyBottom)
+                TranscriptionView.Dispatcher.BeginInvoke(
+                    new Action(() => TranscriptionView.ScrollToEnd()), DispatcherPriority.Background);
+        }
+
+        private void TranscriptJumpToLatest_Click(object sender, RoutedEventArgs e)
+        {
+            transcriptStickyBottom = true;
+            TranscriptionView?.ScrollToEnd();
+            HideTranscriptJump();
+        }
+
+        private void ShowTranscriptJump()
+        {
+            if (TranscriptJumpBtn != null) TranscriptJumpBtn.Visibility = Visibility.Visible;
+        }
+
+        private void HideTranscriptJump()
+        {
+            if (TranscriptJumpBtn != null) TranscriptJumpBtn.Visibility = Visibility.Collapsed;
+        }
+
+        /// <summary>
+        /// Cancels/finalizes any in-progress streaming answer in both views without an error
+        /// banner. Called when the user hits Stop. Shows a subtle "Canceled." note when nothing
+        /// had streamed yet.
+        /// </summary>
+        public void CancelStreaming()
+        {
+            SafeInvoke(() =>
+            {
+                if (isStreamingResponse)
+                {
+                    string partial = streamingBuffer.ToString();
+                    EndStreamingResponse(string.IsNullOrWhiteSpace(partial) ? "_Canceled._" : partial);
+                }
+                if (isTranscriptStreaming)
+                {
+                    string partial = transcriptStreamingBuffer.ToString();
+                    EndStreamingAnswerInTranscript(string.IsNullOrWhiteSpace(partial) ? "_Canceled._" : partial);
+                }
+            });
         }
 
         private void ShowJumpToLatest()
@@ -807,7 +961,9 @@ namespace SnapEye.SolutionRegion
                 lastUserPrefix = lastSystemPrefix = "";
 
                 StartTranscriptTypingIndicator();
-                TranscriptionView?.ScrollToEnd();
+                // Freeze the viewport where it was when the answer started — no auto-scroll
+                // during streaming. If the new text lands below the fold, the ScrollChanged
+                // handler surfaces the "New" jump pill so the user can opt in.
             });
         }
 
@@ -818,11 +974,11 @@ namespace SnapEye.SolutionRegion
                 if (!isTranscriptStreaming || transcriptStreamingTextBlock == null) return;
                 transcriptStreamingBuffer.Append(token);
                 transcriptStreamingTextBlock.Text = transcriptStreamingBuffer.ToString();
-                TranscriptionView?.ScrollToEnd();
+                // No auto-scroll while the answer streams — the user controls the scroll.
             });
         }
 
-        public void EndStreamingAnswerInTranscript(string? fullResponse = null)
+        public void EndStreamingAnswerInTranscript(string? fullResponse = null, double? confidence = null)
         {
             SafeInvoke(() =>
             {
@@ -836,7 +992,19 @@ namespace SnapEye.SolutionRegion
                 // Replace the live plain text with rendered markdown so **bold**, `code`,
                 // lists and code blocks display correctly in the transcript answer bubble.
                 if (transcriptStreamingBubble != null && !string.IsNullOrWhiteSpace(finalText))
-                    transcriptStreamingBubble.Child = BuildBubbleMarkdownViewer(finalText);
+                {
+                    if (confidence.HasValue)
+                    {
+                        var stack = new StackPanel();
+                        stack.Children.Add(BuildBubbleMarkdownViewer(finalText));
+                        stack.Children.Add(BuildConfidenceBadge(confidence.Value));
+                        transcriptStreamingBubble.Child = stack;
+                    }
+                    else
+                    {
+                        transcriptStreamingBubble.Child = BuildBubbleMarkdownViewer(finalText);
+                    }
+                }
                 else if (transcriptStreamingTextBlock != null)
                     transcriptStreamingTextBlock.Text = finalText;
 
@@ -845,7 +1013,8 @@ namespace SnapEye.SolutionRegion
                 transcriptStreamingTextBlock = null;
                 transcriptStreamingBubble = null;
 
-                TranscriptionView?.ScrollToEnd();
+                // Keep the user's scroll position when the plain text swaps to rendered
+                // markdown — don't jump to the end on completion.
             });
         }
 
@@ -989,7 +1158,18 @@ namespace SnapEye.SolutionRegion
                     // it into the current bubble so brief (~1s) pauses don't fragment speech.
                     bool gapped = lastActivity != default
                                   && (now - lastActivity).TotalSeconds > GapSecondsForNewBubble;
-                    bool startNew = flipped || gapped || lastBubble == null || lastText == null;
+
+                    // A DIFFERENT backend message (the id changed) is a distinct, already
+                    // finalized utterance — give it its own bubble instead of merging it
+                    // into the previous one. Merging distinct messages via the prefix path
+                    // was a source of duplicated text; keeping messages separate is both
+                    // clearer and duplicate-proof. The legacy no-id path still merges by gap.
+                    bool differentMessage = !string.IsNullOrEmpty(messageId)
+                                            && !string.IsNullOrEmpty(lastId)
+                                            && messageId != lastId;
+
+                    bool startNew = flipped || gapped || differentMessage || isNewSegment
+                                    || lastBubble == null || lastText == null;
 
                     if (startNew)
                     {
@@ -1019,7 +1199,7 @@ namespace SnapEye.SolutionRegion
 
                 if (isUser) lastUserActivity = now; else lastSystemActivity = now;
                 lastBubbleSource = source;
-                TranscriptionView?.ScrollToEnd();
+                MaybeAutoScrollTranscript();
             });
         }
 

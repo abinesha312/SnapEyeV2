@@ -80,6 +80,7 @@ async def upload_document(
             text=text,
             filename=filename,
             doc_type=doc_type,
+            username=user_data.get("sub"),
         )
 
         return JSONResponse(content=result)
@@ -107,6 +108,7 @@ async def upload_text(
             text=request.text,
             filename=request.filename,
             doc_type=request.doc_type,
+            username=user_data.get("sub"),
         )
         return JSONResponse(content=result)
     except Exception as e:
@@ -129,6 +131,7 @@ async def search_knowledge_base(
             query=request.query,
             top_k=request.top_k,
             filter_doc_id=request.document_id,
+            username=user_data.get("sub"),
         )
 
         return JSONResponse(content={

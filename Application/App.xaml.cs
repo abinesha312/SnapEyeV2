@@ -1,5 +1,8 @@
 using System;
+using System.IO;
+using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Threading;
 using SnapEye.Services;
 
 namespace SnapEye
@@ -11,14 +14,21 @@ namespace SnapEye
         /// </summary>
         private void Application_Startup(object sender, StartupEventArgs e)
         {
+            // Global safety net: SnapEye must never hard-crash. Any exception that
+            // reaches these handlers is logged and swallowed instead of taking down
+            // the process, so a single bad token/callback/background task can't kill
+            // an in-progress interview, sales call, or meeting.
+            this.DispatcherUnhandledException += OnDispatcherUnhandledException;
+            AppDomain.CurrentDomain.UnhandledException += OnAppDomainUnhandledException;
+            TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
+
             try
             {
                 // Load configuration
                 Config.AppConfig.LoadConfiguration();
 
-                // Standalone mode: start (or reuse) the backend automatically so the
-                // app needs no external launcher or watchdog. Runs in the background;
-                // the UI shows immediately and services connect once it's healthy.
+                // Warm up backend: polls /health and auto-starts the Podman Compose stack
+                // (scripts/start-snapeye-backend.ps1) if it isn't already running.
                 _ = BackendProcessService.EnsureBackendAsync();
 
                 // Check if valid session exists
@@ -61,6 +71,63 @@ namespace SnapEye
         {
             Dashboard.Dashboard dashboard = new Dashboard.Dashboard();
             dashboard.Show();
+        }
+
+        // === Global exception handlers (crash resilience) ===
+
+        /// <summary>
+        /// Catches exceptions that escape a UI-thread event handler (e.g. a bad
+        /// streaming-token callback). Without this, WPF's default behavior is to
+        /// terminate the process. We log and mark it handled so the app survives.
+        /// </summary>
+        private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
+        {
+            LogCrash("DispatcherUnhandledException", e.Exception);
+            e.Handled = true;
+        }
+
+        /// <summary>
+        /// Last-resort logger for exceptions on non-UI threads. These are not
+        /// recoverable (the CLR is already tearing the process down), but logging
+        /// them means the real cause is in crash.log instead of a silent exit.
+        /// </summary>
+        private void OnAppDomainUnhandledException(object sender, UnhandledExceptionEventArgs e)
+        {
+            LogCrash("AppDomainUnhandledException", e.ExceptionObject as Exception);
+        }
+
+        /// <summary>
+        /// Catches exceptions from fire-and-forget Task.Run(...) calls that would
+        /// otherwise only surface (or crash the process) when the GC finalizes the
+        /// faulted task.
+        /// </summary>
+        private void OnUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
+        {
+            LogCrash("UnobservedTaskException", e.Exception);
+            e.SetObserved();
+        }
+
+        private static readonly object crashLogLock = new object();
+
+        private static void LogCrash(string source, Exception? ex)
+        {
+            try
+            {
+                Console.WriteLine($"[Crash] {source}: {ex?.Message}");
+                string logDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SnapEye", "logs");
+                Directory.CreateDirectory(logDir);
+                string logPath = Path.Combine(logDir, "crash.log");
+                string entry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {source}: {ex}\n";
+                lock (crashLogLock)
+                {
+                    File.AppendAllText(logPath, entry);
+                }
+            }
+            catch
+            {
+                // Logging must never itself throw during crash handling.
+            }
         }
 
         /// <summary>

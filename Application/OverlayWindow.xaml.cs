@@ -30,6 +30,7 @@ namespace SnapEye
         private readonly ScreenCaptureService screenCaptureService;
         private readonly StreamingResponseService streamingService;
         private readonly ConversationHistoryService history;
+        private readonly ConversationSyncService conversationSync;
         private readonly ConversationTitleService titleService;
         private GlobalHotkeyService? hotkeyService;
 
@@ -43,6 +44,12 @@ namespace SnapEye
         private string? lastAnsweredQuestion;
         private bool lastAnswerWasTranscript;
 
+        // Microphone mute: when true, captured mic audio is NOT sent to the backend
+        // (the backend keepalive keeps the mic stream open so unmute is instant).
+        // Toggled by MicMuteBtn or the global Backtick+Space hook.
+        private bool micMuted;
+        private LowLevelKeyboardHook? micMuteHook;
+
         /// <summary>Pixels per press for Ctrl+Alt+Arrow overlay nudge (RegisterHotKey only; no LL hook).</summary>
         private const int OverlayNudgeStepPx = 28;
 
@@ -55,6 +62,24 @@ namespace SnapEye
         private int selectedModeIndex;
         private DispatcherTimer? sessionTimer;
         private DateTime sessionStartTime;
+
+        // Interview mode: target job description captured via the JD popup.
+        private string interviewJobDescription = "";
+        private string interviewCompany = "";
+        private string interviewRole = "";
+
+        // Confidence reported by the backend for the answer currently completing.
+        // Set just before the matching ResponseComplete / ai.suggestion.end fires.
+        private double? pendingManualConfidence;
+        private double? pendingAutoConfidence;
+
+        // Response cancellation. manualStreaming tracks the HTTP SSE stream; autoStreaming
+        // tracks the live WebSocket AI suggestion. suppressAutoSuggestion drops any further
+        // auto tokens after the user cancels (the backend may still be generating).
+        private bool manualStreaming;
+        private bool autoStreaming;
+        private bool suppressAutoSuggestion;
+        private bool IsResponseStreaming => manualStreaming || autoStreaming;
 
         // Pulse animation for live dot
         private DispatcherTimer? liveDotPulseTimer;
@@ -95,12 +120,47 @@ namespace SnapEye
             screenCaptureService = new ScreenCaptureService(AppConfig.BackendHttpUrl);
             streamingService = new StreamingResponseService(AppConfig.BackendHttpUrl);
             history = new ConversationHistoryService();
+            conversationSync = new ConversationSyncService(AppConfig.BackendHttpUrl, authService.GetAuthorizationHeader);
             titleService = new ConversationTitleService(AppConfig.BackendHttpUrl);
 
             InitializeWindowPosition();
             SubscribeToEvents();
             PopulateModeSelector();
             PopulateQuickActions();
+            // Resume server-side thread on top of the local current-session.json (if any).
+            _ = HydrateConversationFromServerAsync();
+        }
+
+        /// <summary>
+        /// Resume the caller's ongoing server-side conversation (if reachable) so it
+        /// persists across app restarts instead of always starting fresh. Best-effort:
+        /// silently keeps the new local session on any failure (offline, first run, etc.).
+        ///
+        /// This hydrates the underlying data model (<see cref="history"/> and its saved-
+        /// session JSON) so "New Conversation" and the conversation boundary work
+        /// correctly across restarts. It intentionally does NOT replay history into the
+        /// live ChatHistoryPanel/transcript views - AssistantAnswer entries don't record
+        /// which view they originally streamed into, so guessing would risk misplacing
+        /// them; re-rendering old bubbles on launch is a follow-up UI enhancement.
+        /// </summary>
+        private async Task HydrateConversationFromServerAsync()
+        {
+            try
+            {
+                var result = await conversationSync.FetchActiveConversationAsync();
+                if (result == null) return;
+                var (conversationId, messages) = result.Value;
+                if (messages.Count == 0) return;
+
+                // Server is authoritative when it has history; merge into the single ongoing
+                // local thread so voice/text/image all stay in one conversation.
+                history.HydrateFromServer(conversationId, messages);
+                history.SaveCurrentNow();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] Conversation hydration error: {ex.Message}");
+            }
         }
 
         protected override void OnSourceInitialized(EventArgs e)
@@ -114,11 +174,64 @@ namespace SnapEye
         public void SetSession(SessionManager.SessionData session)
         {
             currentSession = session;
-            transcriptionService.SetAuthToken(session.AccessToken);
-            screenCaptureService.SetAuthToken(session.AccessToken);
-            streamingService.SetAuthToken(session.AccessToken);
-            titleService.SetAuthToken(session.AccessToken);
+            authService.AccessToken = session.AccessToken;
+            authService.RefreshToken = session.RefreshToken;
+            ApplyAuthTokens(session.AccessToken);
             RefreshToolbarUsername();
+        }
+
+        /// <summary>Push the current JWT to every backend client in the overlay.</summary>
+        private void ApplyAuthTokens(string token)
+        {
+            if (string.IsNullOrEmpty(token)) return;
+            transcriptionService.SetAuthToken(token);
+            screenCaptureService.SetAuthToken(token);
+            streamingService.SetAuthToken(token);
+            titleService.SetAuthToken(token);
+        }
+
+        /// <summary>
+        /// Ensure the JWT is still valid before any authenticated API call. Refreshes
+        /// automatically using the stored refresh token (same flow as the Dashboard).
+        /// </summary>
+        private async Task<bool> EnsureAuthTokenFreshAsync()
+        {
+            if (currentSession == null)
+            {
+                ShowInlineError("Not signed in. Open the Dashboard and sign in again.");
+                return false;
+            }
+
+            if (DateTime.Now <= currentSession.ExpiryTime
+                && !string.IsNullOrEmpty(currentSession.AccessToken))
+            {
+                ApplyAuthTokens(currentSession.AccessToken);
+                return true;
+            }
+
+            if (DateTime.Now > currentSession.StorageExpiry)
+            {
+                ShowInlineError("Session expired (90 days). Sign in again from the Dashboard.");
+                return false;
+            }
+
+            authService.AccessToken = currentSession.AccessToken;
+            authService.RefreshToken = currentSession.RefreshToken;
+
+            if (!await authService.RefreshTokenAsync().ConfigureAwait(false))
+            {
+                ShowInlineError("Session expired. Open the Dashboard and sign in again.");
+                return false;
+            }
+
+            currentSession.AccessToken = authService.AccessToken ?? currentSession.AccessToken;
+            currentSession.RefreshToken = authService.RefreshToken ?? currentSession.RefreshToken;
+            currentSession.ExpiresIn = authService.ExpiresIn;
+            currentSession.ExpiryTime = DateTime.Now.AddSeconds(authService.ExpiresIn - 60);
+            SessionManager.SaveSession(currentSession);
+            ApplyAuthTokens(currentSession.AccessToken);
+            Console.WriteLine("[Auth] Access token refreshed in overlay");
+            return true;
         }
 
         /// <summary>Shows the signed-in user in the toolbar (replaces the old dashboard icon).</summary>
@@ -180,6 +293,20 @@ namespace SnapEye
             // even when another application has focus. Window_Loaded fires after the
             // HWND exists, which is what GlobalHotkeyService needs.
             RegisterGlobalHotkeys();
+
+            // Global Backtick(`)+Space toggles mic mute. This chord can't be a
+            // RegisterHotKey combo (` isn't a valid modifier), so it uses a low-level
+            // keyboard hook installed on this (UI) thread, which has a message loop.
+            try
+            {
+                micMuteHook = new LowLevelKeyboardHook(
+                    LowLevelKeyboardHook.VK_OEM_3, LowLevelKeyboardHook.VK_SPACE);
+                micMuteHook.ChordPressed += (s, _) => ToggleMicMute();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Hotkey] Mic mute hook error: {ex.Message}");
+            }
         }
 
         /// <summary>Screen-pixel rectangle of the Island Bar button (the click-through carve-out).</summary>
@@ -216,6 +343,46 @@ namespace SnapEye
             catch (Exception ex)
             {
                 Console.WriteLine($"[UI] Island Bar toggle error: {ex.Message}");
+            }
+        }
+
+        /// <summary>Fired by the MicMuteBtn toggle (Checked = muted).</summary>
+        private void MicMuteBtn_Changed(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                micMuted = MicMuteBtn.IsChecked == true;
+                MicMuteBtn.ToolTip = micMuted
+                    ? "Microphone muted — click or press ` + Space to unmute"
+                    : "Mute microphone (` + Space)";
+                if (micMuted)
+                    ShowInlineError("Microphone muted — your voice isn't being transcribed.");
+                else
+                    ClearInlineError();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] Mic mute toggle error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Toggles mic mute by flipping the toggle button (which raises
+        /// <see cref="MicMuteBtn_Changed"/>). Safe to call from any thread / hotkey.
+        /// </summary>
+        public void ToggleMicMute()
+        {
+            try
+            {
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    try { MicMuteBtn.IsChecked = MicMuteBtn.IsChecked != true; }
+                    catch (Exception ex) { Console.WriteLine($"[UI] ToggleMicMute error: {ex.Message}"); }
+                }));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] ToggleMicMute dispatch error: {ex.Message}");
             }
         }
 
@@ -419,6 +586,7 @@ namespace SnapEye
             transcriptionService.AISuggestionStarted += OnAISuggestionStarted;
             transcriptionService.AISuggestionToken += OnAISuggestionToken;
             transcriptionService.AISuggestionCompleted += OnAISuggestionCompleted;
+            transcriptionService.AISuggestionConfidence += OnAISuggestionConfidence;
             transcriptionService.AISuggestionError += OnAISuggestionError;
 
             // Audio capture events
@@ -436,30 +604,82 @@ namespace SnapEye
             // CameraBtn_Click / transcription AI suggestions).
             streamingService.TokenReceived += (s, token) => Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (streamTarget == StreamTarget.Chat)
-                    AlphaRegion.AppendStreamingToken(token);
-                else
-                    AlphaRegion.AppendStreamingAnswerToken(token);
+                try
+                {
+                    if (streamTarget == StreamTarget.Chat)
+                        AlphaRegion.AppendStreamingToken(token);
+                    else
+                        AlphaRegion.AppendStreamingAnswerToken(token);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[UI] TokenReceived render error: {ex.Message}");
+                }
+            }));
+            streamingService.ConfidenceReceived += (s, conf) => pendingManualConfidence = conf;
+            streamingService.StreamStarted += (s, e) => Dispatcher.BeginInvoke(new Action(() =>
+            {
+                try
+                {
+                    manualStreaming = true;
+                    UpdateStopButton();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[UI] StreamStarted handler error: {ex.Message}");
+                }
             }));
             streamingService.ResponseComplete += (s, full) => Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (streamTarget == StreamTarget.Chat)
-                    AlphaRegion.EndStreamingResponse(full);
-                else
-                    AlphaRegion.EndStreamingAnswerInTranscript(full);
-                if (!string.IsNullOrWhiteSpace(full))
-                    history.Append(ConversationMessageKind.AssistantAnswer, full);
+                try
+                {
+                    manualStreaming = false;
+                    UpdateStopButton();
+                    double? conf = pendingManualConfidence;
+                    pendingManualConfidence = null;
+                    if (streamTarget == StreamTarget.Chat)
+                        AlphaRegion.EndStreamingResponse(full, conf);
+                    else
+                        AlphaRegion.EndStreamingAnswerInTranscript(full, conf);
+                    if (!string.IsNullOrWhiteSpace(full))
+                        history.Append(ConversationMessageKind.AssistantAnswer, full);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[UI] ResponseComplete handler error: {ex.Message}");
+                }
             }));
             streamingService.ErrorOccurred += (s, err) => Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (streamTarget == StreamTarget.Chat)
-                    AlphaRegion.ShowStreamingError(err);
-                else
-                    AlphaRegion.ShowStreamingAnswerError(err);
+                try
+                {
+                    manualStreaming = false;
+                    UpdateStopButton();
+                    if (streamTarget == StreamTarget.Chat)
+                        AlphaRegion.ShowStreamingError(err);
+                    else
+                        AlphaRegion.ShowStreamingAnswerError(err);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[UI] ErrorOccurred handler error: {ex.Message}");
+                }
             }));
 
             // Auth
             authService.ErrorOccurred += OnServiceError;
+
+            // Server-side conversation sync (best-effort, never blocks the UI). Typed/
+            // quick-action/assistant-answer messages are final the moment they're added;
+            // spoken (voice) messages only sync via MessageFinalized once the transcript
+            // segment is final, so interim/refining transcript revisions aren't spammed
+            // to the backend on every partial update.
+            history.MessageAdded += (s, msg) =>
+            {
+                if (msg.Kind != ConversationMessageKind.UserSpoken && msg.Kind != ConversationMessageKind.OtherSpoken)
+                    conversationSync.SyncMessageAsync(msg);
+            };
+            history.MessageFinalized += (s, msg) => conversationSync.SyncMessageAsync(msg);
         }
 
         private void PopulateModeSelector()
@@ -655,10 +875,13 @@ namespace SnapEye
                     NudgeOverlay(ndx, ndy);
                     e.Handled = true;
                 }
-                // Escape: Minimize/hide
+                // Escape: cancel an in-progress response first; otherwise minimize/hide.
                 else if (e.Key == Key.Escape)
                 {
-                    this.Visibility = Visibility.Collapsed;
+                    if (IsResponseStreaming)
+                        CancelActiveResponse();
+                    else
+                        this.Visibility = Visibility.Collapsed;
                     e.Handled = true;
                 }
             }
@@ -750,6 +973,20 @@ namespace SnapEye
             }
         }
 
+        private void Experience_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                // Return to the dashboard and open the Experience editor there.
+                SnapEye.Dashboard.Dashboard.RequestExperienceView = true;
+                Close();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] Experience open error: {ex.Message}");
+            }
+        }
+
         private void MicToggleFromMenu_Click(object sender, RoutedEventArgs e)
             => MicToggle_Click(sender, e);
 
@@ -773,6 +1010,24 @@ namespace SnapEye
             this.Visibility = Visibility.Collapsed;
         }
 
+        /// <summary>
+        /// Closes the current conversation thread and starts a fresh one, both locally
+        /// (new session file) and on the backend (new active conversation row) - the two
+        /// updates run independently so a network hiccup never blocks the local reset.
+        /// </summary>
+        private void NewConversation_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                history.StartNewSession();
+                conversationSync.StartNewConversationAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] New conversation error: {ex.Message}");
+            }
+        }
+
         private void ModeSelector_Changed(object sender, SelectionChangedEventArgs e)
         {
             try
@@ -782,11 +1037,68 @@ namespace SnapEye
                 {
                     var mode = AppConfig.Modes[selectedModeIndex];
                     Console.WriteLine($"[UI] Mode changed to: {mode.Name}");
+
+                    // Interview (and every other mode) uses only the mode template from the
+                    // prompts bar / config — no popup and no separate job-description form.
+                    PushInterviewContextToSession();
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[UI] Mode change error: {ex.Message}");
+            }
+        }
+
+        private void JobDetailsToggle_Changed(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                bool expanded = JobDetailsToggle.IsChecked == true;
+                JobDetailsPanel.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
+                if (expanded)
+                {
+                    // Populate from whatever was entered previously (if anything) each time
+                    // the panel is opened.
+                    JobCompanyBox.Text = interviewCompany;
+                    JobRoleBox.Text = interviewRole;
+                    JobDescriptionBox.Text = interviewJobDescription;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] Job details toggle error: {ex.Message}");
+            }
+        }
+
+        private void JobDetailsField_LostFocus(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                interviewCompany = JobCompanyBox.Text?.Trim() ?? "";
+                interviewRole = JobRoleBox.Text?.Trim() ?? "";
+                interviewJobDescription = JobDescriptionBox.Text?.Trim() ?? "";
+                PushInterviewContextToSession();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] Job details field error: {ex.Message}");
+            }
+        }
+
+        private void PushInterviewContextToSession()
+        {
+            try
+            {
+                _ = transcriptionService.SendInterviewContextAsync(
+                    "",
+                    "",
+                    "",
+                    GetCurrentModeId(),
+                    GetCurrentModeSystemPrompt());
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] Push interview context error: {ex.Message}");
             }
         }
 
@@ -840,6 +1152,9 @@ namespace SnapEye
 
         private async Task RunContextualPromptAsync(string displayLabel, string userPrompt)
         {
+            if (!await EnsureAuthTokenFreshAsync().ConfigureAwait(true))
+                return;
+
             ExpandSessionIfCollapsed();
             ClearInlineError();
 
@@ -856,13 +1171,25 @@ namespace SnapEye
             else
                 AlphaRegion.BeginStreamingResponse(displayLabel);
 
+            manualStreaming = true;
+            UpdateStopButton();
+
             string systemPrompt = GetCurrentSystemPrompt();
             string context = BuildConversationContext();
-            string fullMessage = string.IsNullOrEmpty(context)
-                ? userPrompt
-                : context + "\nUSER REQUEST: " + userPrompt;
 
-            await streamingService.StreamResponseAsync(fullMessage, systemPrompt);
+            // Route through the context endpoint so quick actions are also grounded in the
+            // user's saved experience (and the job description while in interview mode).
+            await streamingService.StreamContextResponseAsync(
+                userPrompt,
+                context,
+                "",
+                "",
+                systemPrompt,
+                null,
+                jobDescription: "",
+                company: "",
+                role: "",
+                mode: GetCurrentModeId());
         }
 
         private void ExpandSessionIfCollapsed()
@@ -1039,6 +1366,9 @@ namespace SnapEye
 
         private async Task StreamAnswerForScreenCaptureAsync(string ocrText, bool inTranscript)
         {
+            if (!await EnsureAuthTokenFreshAsync().ConfigureAwait(true))
+                return;
+
             streamTarget = inTranscript ? StreamTarget.Transcript : StreamTarget.Chat;
             SetLastQuestion("Based on the captured screen, explain what would help me right now.", inTranscript);
 
@@ -1047,6 +1377,9 @@ namespace SnapEye
                 AlphaRegion.BeginStreamingAnswerInTranscript(displayLabel);
             else
                 AlphaRegion.BeginStreamingResponse(displayLabel);
+
+            manualStreaming = true;
+            UpdateStopButton();
 
             string systemPrompt = GetCurrentSystemPrompt();
             string context = BuildConversationContext();
@@ -1069,8 +1402,12 @@ namespace SnapEye
             {
                 string md = AlphaRegion.GetChatMarkdown();
                 if (string.IsNullOrWhiteSpace(md))
+                {
+                    ShowInlineError("Nothing to copy yet — wait for an answer or ask a question first.");
                     return;
+                }
                 Clipboard.SetText(md);
+                ClearInlineError();
             }
             catch (Exception ex)
             {
@@ -1080,6 +1417,12 @@ namespace SnapEye
 
         private async Task StreamUserDirectedLlmAsync(string question)
         {
+            if (!await EnsureAuthTokenFreshAsync().ConfigureAwait(true))
+                return;
+            // Show the Stop control immediately so the user can cancel even before the first
+            // token arrives.
+            manualStreaming = true;
+            UpdateStopButton();
             string transcript = BuildConversationContext();
             string systemPrompt = GetCurrentSystemPrompt();
             await streamingService.StreamContextResponseAsync(
@@ -1088,8 +1431,31 @@ namespace SnapEye
                 "",
                 lastScreenOcr ?? "",
                 systemPrompt,
-                null);
+                null,
+                jobDescription: "",
+                company: "",
+                role: "",
+                mode: GetCurrentModeId());
         }
+
+        private string GetCurrentModeId()
+        {
+            if (selectedModeIndex >= 0 && selectedModeIndex < AppConfig.Modes.Count)
+                return AppConfig.Modes[selectedModeIndex].Id ?? "";
+            return "";
+        }
+
+        /// <summary>Raw template text of the currently-selected mode (no appended suffix),
+        /// sent to the live session so auto-suggestions strictly follow the chosen mode.</summary>
+        private string GetCurrentModeSystemPrompt()
+        {
+            if (selectedModeIndex >= 0 && selectedModeIndex < AppConfig.Modes.Count)
+                return AppConfig.Modes[selectedModeIndex].SystemPrompt ?? "";
+            return "";
+        }
+
+        private bool IsInterviewMode() =>
+            GetCurrentModeId().IndexOf("interview", StringComparison.OrdinalIgnoreCase) >= 0;
 
         private string GetCurrentSystemPrompt()
         {
@@ -1134,32 +1500,25 @@ namespace SnapEye
         #region Transcription Control
 
         /// <summary>
-        /// Wait for the auto-started backend to become reachable, up to <paramref name="timeout"/>.
-        /// Uses the BackendProcessService readiness signal first, then falls back to polling
-        /// /health so a manually-started backend is also picked up.
+        /// Wait for the backend to become reachable, up to <paramref name="timeout"/>.
+        /// BackendProcessService.EnsureBackendAsync() already does its own bounded /health
+        /// polling internally (idempotent - reuses a start already in flight), so this is
+        /// just a single wait against that one readiness signal instead of layering a
+        /// second, redundant polling loop on top of it.
         /// </summary>
         private async Task<bool> WaitForBackendReadyAsync(TimeSpan timeout)
         {
-            var deadline = DateTime.UtcNow + timeout;
             try
             {
-                var readyTask = BackendProcessService.Ready;
+                var readyTask = BackendProcessService.EnsureBackendAsync();
                 var finished = await Task.WhenAny(readyTask, Task.Delay(timeout)).ConfigureAwait(false);
-                if (finished == readyTask && readyTask.Result)
-                    return true;
+                return finished == readyTask && await readyTask.ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[Transcription] Backend readiness wait error: {ex.Message}");
+                return false;
             }
-
-            while (DateTime.UtcNow < deadline)
-            {
-                if (await authService.IsBackendReachableAsync(1000).ConfigureAwait(false))
-                    return true;
-                await Task.Delay(500).ConfigureAwait(false);
-            }
-            return await authService.IsBackendReachableAsync(1000).ConfigureAwait(false);
         }
 
         private async Task StartTranscriptionAsync()
@@ -1168,17 +1527,22 @@ namespace SnapEye
             {
                 ClearInlineError();
 
-                // Fast reachability probe. On a cold start the backend was auto-launched at
-                // app startup (BackendProcessService) and may still be spinning up, so a
-                // failed probe shouldn't immediately error out — instead we wait for it to
-                // finish starting. This fixes the "backend not reachable" shown the very
-                // first time Listen is pressed.
-                bool reachable = await authService.IsBackendReachableAsync(1200);
+                // Backend readiness was kicked off at app startup; reuse that task instead of
+                // probing again (saves a round-trip on every Listen click).
+                bool reachable = BackendProcessService.Ready.IsCompletedSuccessfully
+                                 && BackendProcessService.Ready.Result;
+
                 if (!reachable)
                 {
                     sessionPhase = OverlaySessionPhase.Connecting;
-                    ShowInlineError("Starting backend…");
-                    reachable = await WaitForBackendReadyAsync(TimeSpan.FromSeconds(45));
+                    UpdateConnectingUI(true);
+                    // Lighter copy — Podman auto-start (if needed) runs inside EnsureBackendAsync.
+                    ShowInlineError(BackendProcessService.PodmanStackStarting
+                        ? "Connecting to SnapEye…"
+                        : "Connecting…");
+
+                    reachable = await WaitForBackendReadyAsync(TimeSpan.FromSeconds(90));
+                    UpdateConnectingUI(false);
                     ClearInlineError();
                 }
 
@@ -1186,11 +1550,33 @@ namespace SnapEye
                 {
                     sessionPhase = OverlaySessionPhase.Ready;
                     UpdateListeningUI(false);
-                    ShowInlineError("Backend not reachable. Start the SnapEye backend and try again.");
+                    string detail = BackendProcessService.LastStartError;
+                    ShowInlineError(string.IsNullOrWhiteSpace(detail)
+                        ? "Backend not reachable. Start the SnapEye backend and try again."
+                        : $"Backend didn't start: {detail}");
+                    return;
+                }
+
+                if (!await EnsureAuthTokenFreshAsync().ConfigureAwait(true))
+                {
+                    sessionPhase = OverlaySessionPhase.Ready;
+                    UpdateListeningUI(false);
                     return;
                 }
 
                 sessionPhase = OverlaySessionPhase.Connecting;
+
+                // Warm up the audio devices IN PARALLEL with the WebSocket handshake instead of
+                // after it. WASAPI/WaveIn init can stall 100-1000ms while COM and the driver wake
+                // up; overlapping it with the connect roundtrip removes that from the perceived
+                // start latency. Any audio produced before the socket is open is harmlessly
+                // dropped by SendAudioAsync (it checks the connection state first).
+                var captureWarmup = Task.Run(() =>
+                {
+                    audioCaptureService.StartCapture();
+                    speakerCaptureService.StartCapture();
+                });
+
                 bool connected = await transcriptionService.ConnectAsync(
                     AppConfig.DeepgramModel,
                     AppConfig.DeepgramLanguage,
@@ -1201,21 +1587,18 @@ namespace SnapEye
                 {
                     sessionPhase = OverlaySessionPhase.Listening;
 
-                    // WASAPI / WaveIn init can stall for 100-1000ms while COM and the audio
-                    // driver wake up. Push that work onto a thread-pool worker so the
-                    // dispatcher stays responsive — Windows treats >5s of input lag as
-                    // "Not responding".
-                    await Task.Run(() =>
-                    {
-                        audioCaptureService.StartCapture();
-                        speakerCaptureService.StartCapture();
-                    });
+                    // Make sure the capture warm-up finished (usually already done by now).
+                    await captureWarmup;
 
                     UpdateListeningUI(true);
                     StartSessionTimer();
 
                     if (!string.IsNullOrWhiteSpace(lastScreenOcr))
                         await transcriptionService.SendScreenContextAsync(lastScreenOcr);
+
+                    // If interview mode is already active, hand the session the JD/mode so the
+                    // live auto-suggestion pipeline tailors answers from the first utterance.
+                    PushInterviewContextToSession();
 
                     ExpandSessionIfCollapsed();
 
@@ -1225,6 +1608,13 @@ namespace SnapEye
                 else
                 {
                     sessionPhase = OverlaySessionPhase.Ready;
+                    // Connect failed after we warmed the mic/speaker — release the devices.
+                    await captureWarmup;
+                    await Task.Run(() =>
+                    {
+                        audioCaptureService.StopCapture();
+                        speakerCaptureService.StopCapture();
+                    });
                     UpdateListeningUI(false);
                     ShowInlineError("Failed to connect to transcription service.");
                 }
@@ -1324,6 +1714,38 @@ namespace SnapEye
 
                     StopLiveDotPulse();
                 }
+            }
+        }
+
+        /// <summary>
+        /// Lightweight "connecting" cue while the backend is starting up: tints the listen
+        /// icon amber and pulses it. Cleared when connecting resolves (listening or error).
+        /// </summary>
+        private void UpdateConnectingUI(bool connecting)
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(() => UpdateConnectingUI(connecting)));
+                return;
+            }
+
+            var listenIcon = FindListenIcon();
+            var listenBorder = FindListenBtnBorder();
+
+            if (connecting)
+            {
+                if (listenIcon != null)
+                    listenIcon.Fill = new SolidColorBrush(Color.FromRgb(0xFD, 0xE0, 0x47)); // amber
+                if (listenBorder != null)
+                    listenBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(0xF5, 0x9E, 0x0B));
+                StartLiveDotPulse();
+            }
+            else
+            {
+                StopLiveDotPulse();
+                // Restore the idle look; StartTranscriptionAsync will set the listening
+                // look via UpdateListeningUI when it connects, or leave idle on failure.
+                UpdateListeningUI(false);
             }
         }
 
@@ -1484,12 +1906,12 @@ namespace SnapEye
                     if (msg.Source == MessageSource.Microphone)
                     {
                         AlphaRegion.AddUserTranscription(msg.Text, msg.IsNewSegment, msg.MessageId);
-                        history.UpsertSpoken(ConversationMessageKind.UserSpoken, msg.MessageId, msg.Text);
+                        history.UpsertSpoken(ConversationMessageKind.UserSpoken, msg.MessageId, msg.Text, msg.IsFinal);
                     }
                     else
                     {
                         AlphaRegion.AddSystemTranscription(msg.Text, msg.IsNewSegment, msg.MessageId);
-                        history.UpsertSpoken(ConversationMessageKind.OtherSpoken, msg.MessageId, msg.Text);
+                        history.UpsertSpoken(ConversationMessageKind.OtherSpoken, msg.MessageId, msg.Text, msg.IsFinal);
                     }
                 }));
             }
@@ -1542,7 +1964,9 @@ namespace SnapEye
         {
             try
             {
-                if (IsListening && transcriptionService.IsConnected)
+                // Drop mic audio while muted; the backend keepalive keeps the mic
+                // stream open so toggling back on resumes transcription immediately.
+                if (IsListening && transcriptionService.IsConnected && !micMuted)
                     await transcriptionService.SendAudioAsync(e.AudioData, MessageSource.Microphone);
             }
             catch (Exception ex)
@@ -1582,6 +2006,10 @@ namespace SnapEye
         {
             Dispatcher.BeginInvoke(new Action(() =>
             {
+                // A new auto answer is starting — clear any prior cancel suppression.
+                suppressAutoSuggestion = false;
+                autoStreaming = true;
+                UpdateStopButton();
                 AlphaRegion.SwitchToTranscriptionTab();
                 TranscriptToggle.IsChecked = true;
                 SetLastQuestion(question, inTranscript: true);
@@ -1591,17 +2019,35 @@ namespace SnapEye
 
         private void OnAISuggestionToken(object? sender, string token)
         {
+            // Dropped once the user cancels this answer (backend may still be generating).
+            if (suppressAutoSuggestion) return;
             // BeginInvoke: tokens stream at 50+/sec from the WebSocket receive thread.
             // Synchronous Invoke would block that thread per token, building latency and
             // potentially starving the dispatcher under load.
             Dispatcher.BeginInvoke(new Action(() => AlphaRegion.AppendStreamingAnswerToken(token)));
         }
 
+        private void OnAISuggestionConfidence(object? sender, double confidence)
+        {
+            pendingAutoConfidence = confidence;
+        }
+
         private void OnAISuggestionCompleted(object? sender, string response)
         {
             Dispatcher.BeginInvoke(new Action(() =>
             {
-                AlphaRegion.EndStreamingAnswerInTranscript(string.IsNullOrEmpty(response) ? null : response);
+                autoStreaming = false;
+                UpdateStopButton();
+                // If the user cancelled, the bubble was already finalized — don't overwrite it.
+                if (suppressAutoSuggestion)
+                {
+                    suppressAutoSuggestion = false;
+                    return;
+                }
+                double? conf = pendingAutoConfidence;
+                pendingAutoConfidence = null;
+                AlphaRegion.EndStreamingAnswerInTranscript(
+                    string.IsNullOrEmpty(response) ? null : response, conf);
                 if (!string.IsNullOrWhiteSpace(response))
                     history.Append(ConversationMessageKind.AssistantAnswer, response);
             }));
@@ -1609,7 +2055,58 @@ namespace SnapEye
 
         private void OnAISuggestionError(object? sender, string error)
         {
-            Dispatcher.BeginInvoke(new Action(() => AlphaRegion.ShowStreamingAnswerError(error)));
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                autoStreaming = false;
+                UpdateStopButton();
+                if (suppressAutoSuggestion) { suppressAutoSuggestion = false; return; }
+                AlphaRegion.ShowStreamingAnswerError(error);
+            }));
+        }
+
+        /// <summary>
+        /// Cancels whatever response is currently generating (manual HTTP stream and/or the
+        /// live WebSocket auto-suggestion) and finalizes the on-screen answer immediately.
+        /// Safe to call when nothing is streaming.
+        /// </summary>
+        private void CancelActiveResponse()
+        {
+            try
+            {
+                // Manual HTTP SSE: cancels the request; its ResponseComplete("" ) will fire.
+                streamingService.CancelCurrentStream();
+
+                // Auto WebSocket suggestion: stop rendering further tokens, tell the backend
+                // to abort generation, and close the bubble.
+                if (autoStreaming)
+                {
+                    suppressAutoSuggestion = true;
+                    _ = transcriptionService.SendCancelAiAsync();
+                }
+
+                manualStreaming = false;
+                autoStreaming = false;
+                UpdateStopButton();
+                AlphaRegion.CancelStreaming();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] Cancel response error: {ex.Message}");
+            }
+        }
+
+        private void StopBtn_Click(object sender, RoutedEventArgs e) => CancelActiveResponse();
+
+        /// <summary>Shows the Stop button only while a response is generating.</summary>
+        private void UpdateStopButton()
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(UpdateStopButton));
+                return;
+            }
+            if (StopBtn != null)
+                StopBtn.Visibility = IsResponseStreaming ? Visibility.Visible : Visibility.Collapsed;
         }
 
         #endregion
@@ -1634,6 +2131,7 @@ namespace SnapEye
                 try { transcriptionService.AISuggestionStarted -= OnAISuggestionStarted; } catch { }
                 try { transcriptionService.AISuggestionToken -= OnAISuggestionToken; } catch { }
                 try { transcriptionService.AISuggestionCompleted -= OnAISuggestionCompleted; } catch { }
+                try { transcriptionService.AISuggestionConfidence -= OnAISuggestionConfidence; } catch { }
                 try { transcriptionService.AISuggestionError -= OnAISuggestionError; } catch { }
                 try { audioCaptureService.MicrophoneDataAvailable -= OnMicrophoneDataAvailable; } catch { }
                 try { audioCaptureService.ErrorOccurred -= OnAudioError; } catch { }
@@ -1642,10 +2140,9 @@ namespace SnapEye
                 try { screenCaptureService.ErrorOccurred -= OnServiceError; } catch { }
                 try { authService.ErrorOccurred -= OnServiceError; } catch { }
 
-                var endedOnClose = history?.Current;
-                history?.EndCurrentSession();
-                if (endedOnClose != null && endedOnClose.Messages.Count > 0)
-                    _ = GenerateAndSaveTitleAsync(endedOnClose);
+                // Persist the ongoing thread without archiving it — closing the overlay is
+                // not the same as ending the conversation.
+                history?.SaveCurrentNow();
 
                 audioCaptureService?.Dispose();
                 speakerCaptureService?.Dispose();
@@ -1662,6 +2159,10 @@ namespace SnapEye
                 // Stop the click-through poller and restore normal hit-testing.
                 try { clickThroughService?.Dispose(); } catch { }
                 clickThroughService = null;
+
+                // Remove the global Backtick+Space keyboard hook.
+                try { micMuteHook?.Dispose(); } catch { }
+                micMuteHook = null;
             }
             catch (Exception ex)
             {

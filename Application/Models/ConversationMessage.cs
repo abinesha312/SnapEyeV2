@@ -34,6 +34,14 @@ namespace SnapEye.Models
         /// <summary>AI-generated one-line summary of the conversation (populated on end/close).</summary>
         public string? Title { get; set; }
 
+        /// <summary>
+        /// The backend's conversation_id for this session (see /api/conversations), once
+        /// known - either returned by GET /api/conversations/active on hydration, or by
+        /// POST /api/conversations/new when the user starts a fresh thread. Null until the
+        /// first successful server round-trip.
+        /// </summary>
+        public string? ConversationId { get; set; }
+
         public System.Collections.Generic.List<ConversationMessage> Messages { get; set; } = new();
     }
 }

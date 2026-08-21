@@ -56,6 +56,14 @@ class ContextManager:
             "key_terms": [],
         }
         self._screen_context: str = ""
+        # Interview context: set by the client when Interview mode is active.
+        self._job_description: str = ""
+        self._interview_company: str = ""
+        self._interview_role: str = ""
+        self._mode: str = ""
+        # Full system-prompt text of the mode the user has selected in the client. Prepended
+        # to every live auto-suggestion so the active mode's instructions are strictly applied.
+        self._mode_system_prompt: str = ""
 
     def add_transcript(
         self,
@@ -88,6 +96,29 @@ class ContextManager:
         """Update the screen context (from OCR)."""
         self._screen_context = ocr_text
 
+    def set_interview_context(
+        self,
+        job_description: str = "",
+        company: str = "",
+        role: str = "",
+        mode: str = "",
+        mode_system_prompt: str = "",
+    ):
+        """Store the active mode and (for interview mode) the target job description."""
+        self._job_description = job_description or ""
+        self._interview_company = company or ""
+        self._interview_role = role or ""
+        self._mode = mode or ""
+        self._mode_system_prompt = mode_system_prompt or ""
+
+    @property
+    def is_interview(self) -> bool:
+        return "interview" in (self._mode or "").lower() or bool(self._job_description)
+
+    @property
+    def job_description(self) -> str:
+        return self._job_description
+
     def get_rolling_window(self, last_n_tokens: int = 0) -> str:
         """Get the rolling transcript window as formatted text."""
         target_tokens = last_n_tokens or self.max_tokens
@@ -104,11 +135,34 @@ class ContextManager:
         parts.reverse()
         return "\n".join(parts)
 
+    @staticmethod
+    def _format_experience_chunks(experience_chunks: Optional[List]) -> str:
+        """Format retrieved experience/education entries for the prompt."""
+        if not experience_chunks:
+            return ""
+        parts = []
+        for chunk in experience_chunks[:5]:
+            meta = getattr(chunk, "metadata", None) or {}
+            text = chunk.text if hasattr(chunk, "text") else str(chunk)
+            company = meta.get("company", "")
+            role = meta.get("role", "")
+            period = ""
+            if meta.get("start_date") or meta.get("end_date"):
+                period = f" ({meta.get('start_date', '?')} - {meta.get('end_date', 'Present')})"
+            header_bits = [b for b in [role, company] if b]
+            header = " at ".join(header_bits) + period if header_bits else "Experience"
+            body = meta.get("summary") or text
+            parts.append(f"- {header}:\n  {body}")
+        return "\n".join(parts)
+
     def build_llm_context(
         self,
         question: str,
         rag_chunks: Optional[List] = None,
         system_prompt: Optional[str] = None,
+        experience_chunks: Optional[List] = None,
+        memory_chunks: Optional[List] = None,
+        experience_searched: bool = False,
     ) -> Dict:
         """
         Build a complete context for the LLM request.
@@ -133,12 +187,45 @@ class ContextManager:
                 rag_parts.append(f"[Source {i+1}, relevance: {score:.2f}]\n{text}")
             rag_text = "\n\n".join(rag_parts)
 
+        experience_text = self._format_experience_chunks(experience_chunks)
+
         # Build the user message with clear structure
         user_parts = []
 
         if self._session_summary:
             user_parts.append(
                 f"SESSION SUMMARY:\n{self._session_summary}"
+            )
+
+        if experience_text:
+            user_parts.append(
+                "MY RELEVANT BACKGROUND (draw on this to answer in the first person, "
+                "as the candidate — these are my real experiences):\n"
+                f"{experience_text}"
+            )
+        elif experience_searched and not experience_text:
+            user_parts.append(
+                "BACKGROUND NOTE: No experience entry matched this question closely. "
+                "Do NOT invent prior roles, projects, or employers — answer from general "
+                "knowledge or say briefly you don't have a matching example."
+            )
+
+        if memory_chunks:
+            mem_lines = []
+            for chunk in memory_chunks[:3]:
+                text = chunk.text if hasattr(chunk, "text") else str(chunk)
+                mem_lines.append(f"- {text}")
+            user_parts.append(
+                "RELEVANT PAST CONVERSATION (same user):\n" + "\n".join(mem_lines)
+            )
+
+        if self.is_interview and self._job_description:
+            target = ""
+            if self._interview_role or self._interview_company:
+                target = f" (target role: {self._interview_role} at {self._interview_company})"
+            user_parts.append(
+                f"TARGET JOB DESCRIPTION{target}:\n---\n{self._job_description[:3000]}\n---\n"
+                "Tailor the answer to the skills, tools, and standards this role expects."
             )
 
         if transcript_text:
@@ -159,24 +246,13 @@ class ContextManager:
 
         user_parts.append(
             f"DETECTED QUESTION FROM CONVERSATION: {question}\n\n"
-            f"Using the conversation transcript and any other context above, "
-            f"provide a helpful, concise answer to the detected question. "
-            f"If the question references something discussed in the transcript, "
-            f"use that information directly. Be specific and actionable."
+            f"Using my background and any other context above, "
+            f"answer the detected question. If my background is relevant, answer in the "
+            f"first person about what I actually did. Be specific and actionable."
         )
 
         if not system_prompt:
-            system_prompt = (
-                "You are SnapEye, a real-time AI assistant that monitors live conversations. "
-                "You DO have access to the live conversation transcript provided below. "
-                "When a question or topic is detected in the conversation, you provide "
-                "helpful, context-aware answers based on what was actually said. "
-                "IMPORTANT: You CAN see the conversation transcript. Do NOT say you don't "
-                "have access to previous conversations - you do, it's provided in the user message. "
-                "Be concise, accurate, and use markdown formatting. "
-                "Answer based on the transcript context when relevant, or provide general "
-                "knowledge when the question is about a topic discussed."
-            )
+            system_prompt = self._default_system_prompt()
 
         return {
             "system_prompt": system_prompt,
@@ -184,7 +260,52 @@ class ContextManager:
             "transcript_context": transcript_text,
             "rag_context": rag_text,
             "screen_context": self._screen_context,
+            "experience_context": experience_text,
         }
+
+    def _default_system_prompt(self) -> str:
+        """
+        Human, first-person, STAR-style assistant prompt. Answers sound like a real
+        person recounting their work — the challenge, what they did (including the
+        workflow/architecture), and the value delivered to the business — with genuine
+        emotion and reflection rather than robotic bullet dumps.
+        """
+        base = (
+            "You are SnapEye, a real-time assistant that speaks AS the user (first person, \"I\"). "
+            "You DO have access to the live conversation transcript and the user's real background "
+            "provided in the user message. Never say you lack access to the conversation.\n\n"
+            "When answering questions about the user's experience, respond like a thoughtful human "
+            "telling their story:\n"
+            "- Briefly set the situation and the real challenge or struggle you faced.\n"
+            "- Explain what YOU did: the workflow you designed and the technical architecture, "
+            "concrete tools, and decisions — enough depth to sound like the person who built it.\n"
+            "- Share the human side: what was hard, what you learned, how it felt to solve it.\n"
+            "- Close with the outcome and the value it added to the business or organization.\n"
+            "Sound natural, warm, and confident — connected and reflective, never a robotic list. "
+            "Keep it tight (under ~220 words) and use light markdown (**bold**, short paragraphs), "
+            "no large headings.\n"
+            "STRICT RULES:\n"
+            "- Answer the detected question directly and stay strictly on-topic — no filler, no "
+            "unrelated tangents.\n"
+            "- Be concrete and practical (specific steps, tools, decisions).\n"
+            "- The detected question may be garbled by speech-to-text; answer the most likely "
+            "intent from the transcript rather than replying about the literal broken words.\n"
+            "- Ground every claim in the background/context provided; never invent facts. If it "
+            "isn't in my background or the context, say so briefly instead of fabricating."
+        )
+        if self.is_interview:
+            base += (
+                "\n\nINTERVIEW MODE: Follow the ACTIVE MODE instructions above. Present me as a "
+                "strong, likeable candidate while staying truthful to my real experience."
+            )
+        # Prepend the active mode's instructions so the mode the user picked is strictly
+        # applied to every live suggestion, on top of the grounding rules above.
+        if self._mode_system_prompt.strip():
+            base = (
+                "ACTIVE MODE (follow these instructions strictly):\n"
+                f"{self._mode_system_prompt.strip()}\n\n" + base
+            )
+        return base
 
     async def summarize_if_needed(self) -> Optional[str]:
         """

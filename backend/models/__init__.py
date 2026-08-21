@@ -1,6 +1,7 @@
 """Models package"""
 from .schemas import (
     LoginRequest,
+    AppendMessageRequest,
     SearchRequest,
     ImageSearchRequest,
     TranscribeRequest,
@@ -15,6 +16,7 @@ from .schemas import (
 
 __all__ = [
     "LoginRequest",
+    "AppendMessageRequest",
     "SearchRequest",
     "ImageSearchRequest",
     "TranscribeRequest",

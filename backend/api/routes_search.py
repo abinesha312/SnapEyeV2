@@ -12,8 +12,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models import SearchRequest, ImageSearchRequest, SearchResponse, ErrorResponse, DecryptRequest
 from security import auth_handler, security_manager
-from services import image_service, text_service
 from config import settings
+
+# image_service/text_service are OpenAI-SDK-backed singletons. They're imported
+# lazily inside each route handler below (not here) so that simply loading this
+# router module - which happens at backend startup - doesn't force the OpenAI SDK
+# import before the server has even bound its port.
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -85,7 +89,9 @@ async def image_search(
             )
         
         logger.info(f"Image search request from user: {user_data.get('sub')} - {query[:50]}")
-        
+
+        from services import image_service
+
         # Process image search
         result = await image_service.process(
             image_data=image_data,
@@ -137,7 +143,9 @@ async def text_search(
     """
     try:
         logger.info(f"Text search request from user: {user_data.get('sub')} - {request.query[:50]}")
-        
+
+        from services import text_service
+
         # Process text search
         result = await text_service.process(
             query=request.query,

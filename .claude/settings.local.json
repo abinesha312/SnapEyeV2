@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dotnet run)"
+      "Bash(dotnet run)",
+      "PowerShell(pip show deepgram-sdk)",
+      "PowerShell(python -c \"import inspect, deepgram; from deepgram import DeepgramClient; c = DeepgramClient\\(api_key='x'\\); print\\(inspect.signature\\(c.listen.v1.connect\\)\\)\")",
+      "PowerShell($p = Start-Process -FilePath \"backend\\\\venv\\\\Scripts\\\\python.exe\" -ArgumentList \"run_server.py\" -WorkingDirectory \"backend\" -WindowStyle Hidden -PassThru; $healthy = $false; foreach \\($i in 1..30\\) { Start-Sleep -Milliseconds 1000; try { $r = Invoke-RestMethod -Uri \"http://localhost:8080/health\" -TimeoutSec 2; $healthy = $true; break } catch {} ; if \\($p.HasExited\\) { Write-Output \"process exited early: $\\($p.ExitCode\\)\"; break } }; if \\($healthy\\) { Write-Output \"HEALTHY: $\\($r | ConvertTo-Json -Compress\\)\" }; if \\(-not $p.HasExited\\) { Stop-Process -Id $p.Id -Force -Confirm:$false; Write-Output \"backend stopped\" })",
+      "WebFetch(domain:github.com)"
     ],
     "deny": [],
     "ask": []

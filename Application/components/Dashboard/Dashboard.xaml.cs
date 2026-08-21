@@ -20,6 +20,12 @@ namespace SnapEye.Dashboard
         private readonly AuthService authService;
         private readonly ConversationHistoryService historyService;
         private readonly ConversationTitleService titleService;
+        private ProfileService? profileService;
+        private readonly System.Collections.ObjectModel.ObservableCollection<ExperienceRow> experienceRows = new();
+        private bool experienceListBound;
+
+        /// <summary>Set by the overlay's "Experience…" menu item to open the editor on return.</summary>
+        public static bool RequestExperienceView { get; set; }
         private SessionData? currentSession;
         private List<ConversationSession> loadedConversations = new();
         private ConversationSession? selectedConversation;
@@ -204,9 +210,9 @@ namespace SnapEye.Dashboard
             await PerformLogin();
         }
 
-        private void LaunchButton_Click(object sender, RoutedEventArgs e)
+        private async void LaunchButton_Click(object sender, RoutedEventArgs e)
         {
-            LaunchMainApplication();
+            await LaunchMainApplication();
         }
 
         private void SignOutButton_Click(object sender, RoutedEventArgs e)
@@ -394,7 +400,7 @@ namespace SnapEye.Dashboard
         /// <summary>
         /// Launch main SnapEye overlay application
         /// </summary>
-        private void LaunchMainApplication()
+        private async Task LaunchMainApplication()
         {
             try
             {
@@ -404,12 +410,16 @@ namespace SnapEye.Dashboard
                     return;
                 }
 
-                // Verify session is still valid
+                // Verify session is still valid (refresh automatically if the JWT expired).
                 if (DateTime.Now > currentSession.ExpiryTime)
                 {
-                    ShowError("Session expired. Please sign in again.");
-                    ShowLoginPanel();
-                    return;
+                    await TryRefreshToken();
+                    if (DateTime.Now > currentSession.ExpiryTime)
+                    {
+                        ShowError("Session expired. Please sign in again.");
+                        ShowLoginPanel();
+                        return;
+                    }
                 }
 
                 // Create and show overlay window
@@ -435,6 +445,15 @@ namespace SnapEye.Dashboard
                     {
                         this.Show();          // bring the dashboard back
                         CheckExistingSession(); // reload session status
+
+                        // The overlay's "Experience…" menu item asks us to jump straight
+                        // to the Experience editor when it returns focus to the dashboard.
+                        if (RequestExperienceView)
+                        {
+                            RequestExperienceView = false;
+                            try { if (NavExperience != null) NavExperience.IsChecked = true; }
+                            catch { /* nav not ready */ }
+                        }
                     }
                     catch (InvalidOperationException ex)
                     {
@@ -554,48 +573,43 @@ namespace SnapEye.Dashboard
             LoadConversations();
         }
 
-        private void ShowLaunchView()
+        private void CollapseAllViews()
         {
-            if (LaunchView != null) LaunchView.Visibility = Visibility.Visible;
+            if (LaunchView != null) LaunchView.Visibility = Visibility.Collapsed;
             if (ConversationsView != null) ConversationsView.Visibility = Visibility.Collapsed;
             if (PromptsView != null) PromptsView.Visibility = Visibility.Collapsed;
             if (AiModelsView != null) AiModelsView.Visibility = Visibility.Collapsed;
             if (ShortcutsView != null) ShortcutsView.Visibility = Visibility.Collapsed;
+            if (ExperienceView != null) ExperienceView.Visibility = Visibility.Collapsed;
+        }
+
+        private void ShowLaunchView()
+        {
+            CollapseAllViews();
+            if (LaunchView != null) LaunchView.Visibility = Visibility.Visible;
         }
 
         private void ShowConversationsView()
         {
-            if (LaunchView != null) LaunchView.Visibility = Visibility.Collapsed;
+            CollapseAllViews();
             if (ConversationsView != null) ConversationsView.Visibility = Visibility.Visible;
-            if (PromptsView != null) PromptsView.Visibility = Visibility.Collapsed;
-            if (AiModelsView != null) AiModelsView.Visibility = Visibility.Collapsed;
-            if (ShortcutsView != null) ShortcutsView.Visibility = Visibility.Collapsed;
         }
 
         private void ShowPromptsView()
         {
-            if (LaunchView != null) LaunchView.Visibility = Visibility.Collapsed;
-            if (ConversationsView != null) ConversationsView.Visibility = Visibility.Collapsed;
+            CollapseAllViews();
             if (PromptsView != null) PromptsView.Visibility = Visibility.Visible;
-            if (AiModelsView != null) AiModelsView.Visibility = Visibility.Collapsed;
-            if (ShortcutsView != null) ShortcutsView.Visibility = Visibility.Collapsed;
         }
 
         private void ShowAiModelsView()
         {
-            if (LaunchView != null) LaunchView.Visibility = Visibility.Collapsed;
-            if (ConversationsView != null) ConversationsView.Visibility = Visibility.Collapsed;
-            if (PromptsView != null) PromptsView.Visibility = Visibility.Collapsed;
+            CollapseAllViews();
             if (AiModelsView != null) AiModelsView.Visibility = Visibility.Visible;
-            if (ShortcutsView != null) ShortcutsView.Visibility = Visibility.Collapsed;
         }
 
         private void ShowShortcutsView()
         {
-            if (LaunchView != null) LaunchView.Visibility = Visibility.Collapsed;
-            if (ConversationsView != null) ConversationsView.Visibility = Visibility.Collapsed;
-            if (PromptsView != null) PromptsView.Visibility = Visibility.Collapsed;
-            if (AiModelsView != null) AiModelsView.Visibility = Visibility.Collapsed;
+            CollapseAllViews();
             if (ShortcutsView != null) ShortcutsView.Visibility = Visibility.Visible;
 
             if (ShortcutsItemsList != null && ShortcutsItemsList.ItemsSource == null)
@@ -604,11 +618,207 @@ namespace SnapEye.Dashboard
                 ShortcutsPrivacyNote.Text = AppKeyboardShortcuts.ScreenCapturePrivacyNote;
         }
 
+        private void ShowExperienceView()
+        {
+            CollapseAllViews();
+            if (ExperienceView != null) ExperienceView.Visibility = Visibility.Visible;
+        }
+
         private void NavShortcuts_Checked(object sender, RoutedEventArgs e)
         {
             if (!IsLoaded) return;
             ShowShortcutsView();
         }
+
+        private void NavExperience_Checked(object sender, RoutedEventArgs e)
+        {
+            if (!IsLoaded) return;
+            ShowExperienceView();
+            _ = LoadExperiencesAsync();
+        }
+
+        #region Experience
+
+        private ProfileService? EnsureProfileService()
+        {
+            if (currentSession == null || string.IsNullOrEmpty(currentSession.AccessToken))
+                return null;
+            if (profileService == null)
+                profileService = new ProfileService(Config.AppConfig.BackendHttpUrl);
+            profileService.SetAuthToken(currentSession.AccessToken);
+            return profileService;
+        }
+
+        private async Task LoadExperiencesAsync()
+        {
+            if (!experienceListBound && ExperienceList != null)
+            {
+                ExperienceList.ItemsSource = experienceRows;
+                experienceListBound = true;
+            }
+
+            var svc = EnsureProfileService();
+            if (svc == null) return;
+
+            try
+            {
+                var entries = await svc.ListAsync();
+                experienceRows.Clear();
+                foreach (var entry in entries)
+                    experienceRows.Add(new ExperienceRow(entry));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Dashboard] Load experiences error: {ex.Message}");
+            }
+            finally
+            {
+                UpdateExperienceEmpty();
+            }
+        }
+
+        private void UpdateExperienceEmpty()
+        {
+            if (ExperienceEmpty != null)
+                ExperienceEmpty.Visibility = experienceRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        private void AddExperience_Click(object sender, RoutedEventArgs e)
+        {
+            experienceRows.Insert(0, new ExperienceRow(new ExperienceEntry { EntryType = "work" }));
+            UpdateExperienceEmpty();
+        }
+
+        private void AddEducation_Click(object sender, RoutedEventArgs e)
+        {
+            experienceRows.Insert(0, new ExperienceRow(new ExperienceEntry
+            {
+                EntryType = "education",
+                Company = "University of North Texas",
+            }));
+            UpdateExperienceEmpty();
+        }
+
+        private async void SaveExperience_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement fe || fe.Tag is not ExperienceRow row)
+                return;
+
+            var svc = EnsureProfileService();
+            if (svc == null)
+            {
+                row.StatusText = "Not signed in";
+                return;
+            }
+
+            row.StatusText = "Saving...";
+            try
+            {
+                var entry = row.ToEntry();
+                var saved = string.IsNullOrEmpty(entry.EntryId)
+                    ? await svc.AddAsync(entry)
+                    : await svc.UpdateAsync(entry);
+
+                if (saved != null)
+                {
+                    row.ApplySaved(saved);
+                    row.StatusText = "Saved";
+                }
+                else
+                {
+                    row.StatusText = "Save failed (check a company, role, or summary)";
+                }
+            }
+            catch (Exception ex)
+            {
+                row.StatusText = $"Save failed: {ex.Message}";
+            }
+        }
+
+        private async void DeleteExperience_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement fe || fe.Tag is not ExperienceRow row)
+                return;
+
+            var svc = EnsureProfileService();
+            try
+            {
+                if (svc != null && !string.IsNullOrEmpty(row.EntryId))
+                    await svc.DeleteAsync(row.EntryId);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Dashboard] Delete experience error: {ex.Message}");
+            }
+            finally
+            {
+                experienceRows.Remove(row);
+                UpdateExperienceEmpty();
+            }
+        }
+
+        /// <summary>Editable row view-model bound to the Experience list.</summary>
+        public class ExperienceRow : System.ComponentModel.INotifyPropertyChanged
+        {
+            public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+            private void Raise(string name) =>
+                PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(name));
+
+            public string EntryId { get; private set; }
+            public string EntryType { get; }
+
+            private string company;
+            private string role;
+            private string startDate;
+            private string endDate;
+            private string summary;
+            private string statusText = "";
+
+            public ExperienceRow(ExperienceEntry entry)
+            {
+                EntryId = entry.EntryId ?? "";
+                EntryType = string.IsNullOrEmpty(entry.EntryType) ? "work" : entry.EntryType;
+                company = entry.Company ?? "";
+                role = entry.Role ?? "";
+                startDate = entry.StartDate ?? "";
+                endDate = entry.EndDate ?? "";
+                summary = entry.Summary ?? "";
+            }
+
+            public string Company { get => company; set { company = value; Raise(nameof(Company)); } }
+            public string Role { get => role; set { role = value; Raise(nameof(Role)); } }
+            public string StartDate { get => startDate; set { startDate = value; Raise(nameof(StartDate)); } }
+            public string EndDate { get => endDate; set { endDate = value; Raise(nameof(EndDate)); } }
+            public string Summary { get => summary; set { summary = value; Raise(nameof(Summary)); } }
+            public string StatusText { get => statusText; set { statusText = value; Raise(nameof(StatusText)); } }
+
+            public bool IsEducation => EntryType == "education";
+            public string TypeLabel => IsEducation ? "EDUCATION" : "EXPERIENCE";
+            public string CompanyLabel => IsEducation ? "School / University" : "Company";
+            public string RoleLabel => IsEducation ? "Degree / Program" : "Role / Title";
+            public string SummaryLabel => IsEducation
+                ? "What you studied / built / achieved"
+                : "What you did (challenge, workflow, architecture, impact)";
+
+            public ExperienceEntry ToEntry() => new ExperienceEntry
+            {
+                EntryId = EntryId,
+                EntryType = EntryType,
+                Company = Company,
+                Role = Role,
+                StartDate = StartDate,
+                EndDate = EndDate,
+                Summary = Summary,
+            };
+
+            public void ApplySaved(ExperienceEntry saved)
+            {
+                if (!string.IsNullOrEmpty(saved.EntryId))
+                    EntryId = saved.EntryId;
+            }
+        }
+
+        #endregion
 
         private void RefreshConversations_Click(object sender, RoutedEventArgs e) => LoadConversations();
 

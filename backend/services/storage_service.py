@@ -48,6 +48,37 @@ CREATE TABLE IF NOT EXISTS keywords (
     added_at TEXT NOT NULL
 );
 
+-- One "conversation" is the single ongoing thread a user's chat/voice/OCR/quick-action
+-- activity all appends to, persisting across app restarts until they explicitly start a
+-- new one (is_active flips to the fresh row). Distinct from `sessions`/`messages` above,
+-- which are the raw per-WebSocket-connection Deepgram transcript log.
+CREATE TABLE IF NOT EXISTS conversations (
+    conversation_id TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    title TEXT,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS conversation_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    client_message_id TEXT,
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL,
+    label TEXT,
+    confidence REAL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(conversation_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_msg_client_id
+    ON conversation_messages(conversation_id, client_message_id)
+    WHERE client_message_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_conv_msg_conversation ON conversation_messages(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_username_active ON conversations(username, is_active);
+
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
 """
@@ -255,6 +286,101 @@ class StorageService:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("DELETE FROM keywords WHERE keyword = ?", (keyword.strip(),))
             await db.commit()
+
+    # --- Conversations (the single ongoing thread per user) ---
+
+    async def get_or_create_active_conversation(self, username: str) -> str:
+        """Return the caller's currently-open conversation id, creating one if none exists."""
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT conversation_id FROM conversations WHERE username = ? AND is_active = 1",
+                (username,),
+            )
+            row = await cursor.fetchone()
+            if row:
+                return row[0]
+
+            import uuid
+            conversation_id = uuid.uuid4().hex
+            await db.execute(
+                "INSERT INTO conversations (conversation_id, username, started_at, is_active) "
+                "VALUES (?, ?, ?, 1)",
+                (conversation_id, username, datetime.utcnow().isoformat()),
+            )
+            await db.commit()
+            return conversation_id
+
+    async def start_new_conversation(self, username: str) -> str:
+        """Close the caller's current conversation (if any) and open a fresh one."""
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE conversations SET is_active = 0, ended_at = ? "
+                "WHERE username = ? AND is_active = 1",
+                (datetime.utcnow().isoformat(), username),
+            )
+            await db.commit()
+        return await self.get_or_create_active_conversation(username)
+
+    async def save_conversation_message(
+        self,
+        conversation_id: str,
+        kind: str,
+        text: str,
+        label: Optional[str] = None,
+        confidence: Optional[float] = None,
+        client_message_id: Optional[str] = None,
+    ):
+        """
+        Append a message to a conversation. Idempotent when client_message_id is
+        supplied - a live transcript entry can be re-synced as it's refined (interim
+        -> final) without creating duplicate rows.
+        """
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO conversation_messages "
+                "(conversation_id, client_message_id, kind, text, label, confidence, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(conversation_id, client_message_id) WHERE client_message_id IS NOT NULL "
+                "DO UPDATE SET text = excluded.text, confidence = excluded.confidence",
+                (
+                    conversation_id,
+                    client_message_id,
+                    kind,
+                    text,
+                    label,
+                    confidence,
+                    datetime.utcnow().isoformat(),
+                ),
+            )
+            await db.commit()
+
+    async def list_conversations(self, username: str, limit: int = 50) -> List[Dict]:
+        """List a user's conversations, most recent first."""
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM conversations WHERE username = ? ORDER BY started_at DESC LIMIT ?",
+                (username, limit),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_conversation_messages(self, conversation_id: str, limit: int = 500) -> List[Dict]:
+        """Get all messages in a conversation, oldest first."""
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM conversation_messages WHERE conversation_id = ? "
+                "ORDER BY created_at ASC LIMIT ?",
+                (conversation_id, limit),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
 
 # Global service instance

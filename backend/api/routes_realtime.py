@@ -6,6 +6,7 @@ import json
 import logging
 import base64
 import uuid
+import asyncio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import JSONResponse
 
@@ -132,19 +133,28 @@ async def audio_transcribe(
         # Accept WebSocket connection
         await websocket.accept()
         session_id = f"{user_data.get('sub')}_{uuid.uuid4().hex}"
-        
+
+        # The session now runs TWO Deepgram streams (mic + speaker), each with its own
+        # receive loop. Starlette's WebSocket.send is not safe for concurrent callers,
+        # so serialize every outbound frame through this lock.
+        send_lock = asyncio.Lock()
+
+        async def safe_send(payload: dict):
+            async with send_lock:
+                await websocket.send_json(payload)
+
         # Callbacks for transcript updates
         async def on_transcript(result):
             try:
                 # Forward transcript updates to client
-                await websocket.send_json(result)
+                await safe_send(result)
                 logger.debug(f"Sent transcript: {result.get('type')} - {result.get('transcript', '')[:50]}...")
             except Exception as e:
                 logger.error(f"Error sending transcript: {e}")
         
         async def on_error(error_msg):
             try:
-                await websocket.send_json({
+                await safe_send({
                     "type": "error",
                     "error": error_msg
                 })
@@ -160,11 +170,12 @@ async def audio_transcribe(
             model=model,
             language=language,
             endpointing_ms=endpointing_ms,
-            vad_events=True
+            vad_events=True,
+            username=user_data.get("sub"),
         )
         
         if not deepgram_service:
-            await websocket.send_json({
+            await safe_send({
                 "type": "error",
                 "error": "Failed to create Deepgram session"
             })
@@ -179,7 +190,7 @@ async def audio_transcribe(
             
             async def on_ai_suggestion(msg):
                 try:
-                    await websocket.send_json(msg)
+                    await safe_send(msg)
                 except Exception as e:
                     logger.error(f"AI suggestion send error: {e}")
             
@@ -193,7 +204,7 @@ async def audio_transcribe(
             logger.warning(f"AI pipeline setup skipped: {e}")
         
         # Send session created confirmation
-        await websocket.send_json({
+        await safe_send({
             "type": "session.created",
             "session_id": session_id,
             "model": model,
@@ -247,7 +258,7 @@ async def audio_transcribe(
                         
                         if action == "get_messages":
                             messages = deepgram_service.get_all_messages()
-                            await websocket.send_json({
+                            await safe_send({
                                 "type": "session.messages",
                                 "messages": messages,
                                 "total": len(messages)
@@ -256,7 +267,7 @@ async def audio_transcribe(
                         
                         elif action == "reset":
                             deepgram_service.reset_session()
-                            await websocket.send_json({
+                            await safe_send({
                                 "type": "session.reset",
                                 "status": "Session reset successfully"
                             })
@@ -265,7 +276,7 @@ async def audio_transcribe(
                         elif action == "finalize":
                             deepgram_service.finalize_current_message()
                             current_msg = deepgram_service.get_current_message()
-                            await websocket.send_json({
+                            await safe_send({
                                 "type": "message.finalized",
                                 "message": current_msg
                             })
@@ -275,7 +286,7 @@ async def audio_transcribe(
                             raw = command.get("text") or command.get("ocr") or ""
                             text = (raw or "")[:12000]
                             context_mgr.set_screen_context(text)
-                            await websocket.send_json({
+                            await safe_send({
                                 "type": "screen_context.ack",
                                 "length": len(text),
                                 "status": "ok",
@@ -285,9 +296,41 @@ async def audio_transcribe(
                                 session_id,
                                 len(text),
                             )
-                        
+
+                        elif action == "set_interview_context":
+                            context_mgr.set_interview_context(
+                                job_description=(command.get("job_description") or "")[:8000],
+                                company=command.get("company") or "",
+                                role=command.get("role") or "",
+                                mode=command.get("mode") or "",
+                                mode_system_prompt=(command.get("mode_system_prompt") or "")[:4000],
+                            )
+                            await safe_send({
+                                "type": "interview_context.ack",
+                                "mode": command.get("mode") or "",
+                                "has_jd": bool(command.get("job_description")),
+                                "status": "ok",
+                            })
+                            logger.info(
+                                "Interview context updated for %s (mode=%s, jd=%s chars)",
+                                session_id,
+                                command.get("mode") or "",
+                                len(command.get("job_description") or ""),
+                            )
+
+                        elif action == "cancel_ai":
+                            # User hit Stop: abort any in-flight auto AI suggestion so the
+                            # backend stops generating and frees the shared AI lock.
+                            cancelled = await deepgram_service.cancel_ai()
+                            await safe_send({
+                                "type": "ai.suggestion.cancelled",
+                                "cancelled": bool(cancelled),
+                                "status": "ok",
+                            })
+                            logger.info(f"AI suggestion cancel requested for {session_id} (cancelled={cancelled})")
+
                         else:
-                            await websocket.send_json({
+                            await safe_send({
                                 "type": "error",
                                 "error": f"Unknown action: {action}",
                                 "valid_actions": [
@@ -295,17 +338,19 @@ async def audio_transcribe(
                                     "reset",
                                     "finalize",
                                     "set_screen_context",
+                                    "set_interview_context",
+                                    "cancel_ai",
                                 ],
                             })
                     
                     except json.JSONDecodeError:
-                        await websocket.send_json({
+                        await safe_send({
                             "type": "error",
                             "error": "Invalid JSON command"
                         })
                     except Exception as e:
                         logger.error(f"Error processing command: {str(e)}")
-                        await websocket.send_json({
+                        await safe_send({
                             "type": "error",
                             "error": str(e)
                         })
@@ -334,7 +379,7 @@ async def audio_transcribe(
         if session_id and deepgram_service:
             try:
                 messages = deepgram_service.get_all_messages()
-                await websocket.send_json({
+                await safe_send({
                     "type": "session.closing",
                     "final_messages": messages,
                     "total_messages": len(messages)

@@ -37,6 +37,22 @@ namespace SnapEye.Models
         {
             new ProviderEntry
             {
+                Id = ProviderClaude,
+                DisplayName = "Claude",
+                Tagline = "Anthropic",
+                Monogram = "C",
+                AccentHex = "#D97757",
+                EndpointUrl = "https://api.anthropic.com/v1",
+                ApiKeyPlaceholder = "sk-ant-...",
+                Models = new List<string>
+                {
+                    "claude-haiku-4-5-20251001",
+                    "claude-sonnet-4.5",
+                    "claude-opus-4.1",
+                },
+            },
+            new ProviderEntry
+            {
                 Id = ProviderOpenAI,
                 DisplayName = "OpenAI",
                 Tagline = "GPT family",
@@ -55,22 +71,6 @@ namespace SnapEye.Models
                     "gpt-4",
                     "gpt-3.5-turbo",
                     "davinci-002",
-                },
-            },
-            new ProviderEntry
-            {
-                Id = ProviderClaude,
-                DisplayName = "Claude",
-                Tagline = "Anthropic",
-                Monogram = "C",
-                AccentHex = "#D97757",
-                EndpointUrl = "https://api.anthropic.com/v1",
-                ApiKeyPlaceholder = "sk-ant-...",
-                Models = new List<string>
-                {
-                    "claude-sonnet-4.5",
-                    "claude-haiku-4.5",
-                    "claude-opus-4.1",
                 },
             },
             new ProviderEntry

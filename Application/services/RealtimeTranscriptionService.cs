@@ -43,6 +43,9 @@ namespace SnapEye.Services
         public event EventHandler<string>? AISuggestionCompleted;
         public event EventHandler<string>? AISuggestionError;
 
+        /// <summary>Backend-reported confidence (0..1) for the just-completed AI suggestion.</summary>
+        public event EventHandler<double>? AISuggestionConfidence;
+
         public bool IsConnected => isConnected;
         public TranscriptionConversation Conversation => conversation;
 
@@ -205,6 +208,93 @@ namespace SnapEye.Services
         }
 
         /// <summary>
+        /// Push the active mode and (for interview mode) the target job description to the
+        /// backend session, so the live auto-suggestion pipeline tailors and grounds answers.
+        /// </summary>
+        public async Task SendInterviewContextAsync(
+            string jobDescription, string company, string role, string mode, string modeSystemPrompt = "")
+        {
+            if (!isConnected || webSocket == null || webSocket.State != WebSocketState.Open)
+                return;
+
+            if (!string.IsNullOrEmpty(jobDescription) && jobDescription.Length > 8000)
+                jobDescription = jobDescription.Substring(0, 8000);
+
+            if (!string.IsNullOrEmpty(modeSystemPrompt) && modeSystemPrompt.Length > 4000)
+                modeSystemPrompt = modeSystemPrompt.Substring(0, 4000);
+
+            var message = new
+            {
+                action = "set_interview_context",
+                job_description = jobDescription ?? "",
+                company = company ?? "",
+                role = role ?? "",
+                mode = mode ?? "",
+                mode_system_prompt = modeSystemPrompt ?? "",
+            };
+            string json = JsonSerializer.Serialize(message);
+            byte[] bytes = Encoding.UTF8.GetBytes(json);
+            var token = cancellationTokenSource?.Token ?? CancellationToken.None;
+
+            await sendLock.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                if (!isConnected || webSocket == null || webSocket.State != WebSocketState.Open)
+                    return;
+                await webSocket.SendAsync(
+                    new ArraySegment<byte>(bytes),
+                    WebSocketMessageType.Text,
+                    endOfMessage: true,
+                    cancellationToken: token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { /* shutdown */ }
+            catch (Exception ex)
+            {
+                ErrorOccurred?.Invoke(this, $"Failed to send interview context: {ex.Message}");
+            }
+            finally
+            {
+                try { sendLock.Release(); } catch { /* disposed */ }
+            }
+        }
+
+        /// <summary>
+        /// Ask the backend to abort any in-flight auto AI suggestion (user hit Stop). The
+        /// backend cancels the running generation task and frees its AI lock.
+        /// </summary>
+        public async Task SendCancelAiAsync()
+        {
+            if (!isConnected || webSocket == null || webSocket.State != WebSocketState.Open)
+                return;
+
+            var message = new { action = "cancel_ai" };
+            string json = JsonSerializer.Serialize(message);
+            byte[] bytes = Encoding.UTF8.GetBytes(json);
+            var token = cancellationTokenSource?.Token ?? CancellationToken.None;
+
+            await sendLock.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                if (!isConnected || webSocket == null || webSocket.State != WebSocketState.Open)
+                    return;
+                await webSocket.SendAsync(
+                    new ArraySegment<byte>(bytes),
+                    WebSocketMessageType.Text,
+                    endOfMessage: true,
+                    cancellationToken: token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { /* shutdown */ }
+            catch (Exception ex)
+            {
+                ErrorOccurred?.Invoke(this, $"Failed to send cancel: {ex.Message}");
+            }
+            finally
+            {
+                try { sendLock.Release(); } catch { /* disposed */ }
+            }
+        }
+
+        /// <summary>
         /// Receive and process messages from WebSocket
         /// </summary>
         private async Task ReceiveMessagesAsync(CancellationToken cancellationToken)
@@ -323,6 +413,11 @@ namespace SnapEye.Services
                         break;
                     
                     case "ai.suggestion.end":
+                        if (root.TryGetProperty("confidence", out var aiConfElem)
+                            && aiConfElem.ValueKind == JsonValueKind.Number)
+                        {
+                            AISuggestionConfidence?.Invoke(this, aiConfElem.GetDouble());
+                        }
                         AISuggestionCompleted?.Invoke(this, "");
                         break;
                     
