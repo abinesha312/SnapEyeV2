@@ -98,6 +98,15 @@ namespace SnapEye.Dashboard
             {
                 currentSession = SessionManager.LoadSession();
 
+                // Auth disabled: never show the login form. Reuse a still-valid stored
+                // session, otherwise sign in silently with the configured defaults.
+                if (!Config.AppConfig.AuthEnabled
+                    && (currentSession == null || DateTime.Now > currentSession.ExpiryTime))
+                {
+                    await AutoLoginAsync();
+                    return;
+                }
+
                 if (currentSession == null)
                 {
                     // No session - show login form
@@ -223,6 +232,52 @@ namespace SnapEye.Dashboard
         #endregion
 
         #region Authentication Logic
+
+        /// <summary>
+        /// Silent sign-in used when <see cref="Config.AppConfig.AuthEnabled"/> is false. Waits for
+        /// the backend to come up, logs in with the default credentials and goes straight to
+        /// the profile panel. Falls back to the login form only if the backend is unreachable.
+        /// </summary>
+        private async Task AutoLoginAsync()
+        {
+            try
+            {
+                ShowLoading(true);
+                HideError();
+                await BackendProcessService.EnsureBackendAsync();
+
+                bool ok = await authService.LoginAsync(Config.AppConfig.DefaultUsername, Config.AppConfig.DefaultApiKey);
+                if (!ok)
+                {
+                    ShowLoading(false);
+                    ShowLoginPanel();
+                    ShowError("Backend not reachable. Start it, then sign in.");
+                    return;
+                }
+
+                currentSession = new SessionData
+                {
+                    Username = Config.AppConfig.DefaultUsername,
+                    AccessToken = authService.AccessToken ?? "",
+                    RefreshToken = authService.RefreshToken ?? "",
+                    TokenType = "bearer",
+                    ExpiresIn = authService.ExpiresIn,
+                    LoginTime = DateTime.Now,
+                    ExpiryTime = DateTime.Now.AddSeconds(authService.ExpiresIn - 60),
+                    StorageExpiry = DateTime.Now.AddDays(90)
+                };
+                SessionManager.SaveSession(currentSession);
+                ShowLoading(false);
+                ShowProfilePanel();
+                Console.WriteLine("SnapEye: auth disabled - signed in automatically");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"SnapEye auto-login error: {ex.Message}");
+                ShowLoading(false);
+                ShowLoginPanel();
+            }
+        }
 
         /// <summary>
         /// Perform login with username and API key

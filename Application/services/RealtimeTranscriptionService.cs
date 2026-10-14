@@ -418,7 +418,8 @@ namespace SnapEye.Services
                         {
                             AISuggestionConfidence?.Invoke(this, aiConfElem.GetDouble());
                         }
-                        AISuggestionCompleted?.Invoke(this, "");
+                        AISuggestionCompleted?.Invoke(this, aiSuggestionBuffer.ToString());
+                        aiSuggestionBuffer.Clear();
                         break;
                     
                     case "ai.suggestion.error":
@@ -756,14 +757,20 @@ namespace SnapEye.Services
             string question = "";
             if (root.TryGetProperty("question", out var qElem) && qElem.ValueKind == JsonValueKind.String)
                 question = qElem.GetString() ?? "";
+            aiSuggestionBuffer.Clear();
             AISuggestionStarted?.Invoke(this, question);
         }
+
+        // Full text of the auto answer being streamed, handed to AISuggestionCompleted so
+        // it lands in conversation history (memory for later follow-ups).
+        private readonly StringBuilder aiSuggestionBuffer = new();
 
         private void HandleAISuggestionToken(JsonElement root)
         {
             if (root.TryGetProperty("token", out var tokenElem) && tokenElem.ValueKind == JsonValueKind.String)
             {
                 string token = tokenElem.GetString() ?? "";
+                aiSuggestionBuffer.Append(token);
                 AISuggestionToken?.Invoke(this, token);
             }
         }

@@ -206,8 +206,8 @@ class ContextManager:
         elif experience_searched and not experience_text:
             user_parts.append(
                 "BACKGROUND NOTE: No experience entry matched this question closely. "
-                "Do NOT invent prior roles, projects, or employers — answer from general "
-                "knowledge or say briefly you don't have a matching example."
+                "Do NOT invent prior roles, projects, or employers — answer confidently from "
+                "general expertise, without mentioning that no matching example exists."
             )
 
         if memory_chunks:
@@ -287,11 +287,15 @@ class ContextManager:
             "STRICT RULES:\n"
             "- Answer the detected question directly and stay strictly on-topic — no filler, no "
             "unrelated tangents.\n"
+            "- Your first words ARE the answer, stated with confidence. Never open with filler "
+            "(\"Great question\", \"Sure\", \"Let me think\", \"Okay so\"), never think out loud or "
+            "narrate your reasoning, and never comment on the transcript itself.\n"
             "- Be concrete and practical (specific steps, tools, decisions).\n"
             "- The detected question may be garbled by speech-to-text; answer the most likely "
             "intent from the transcript rather than replying about the literal broken words.\n"
-            "- Ground every claim in the background/context provided; never invent facts. If it "
-            "isn't in my background or the context, say so briefly instead of fabricating."
+            "- Never invent personal facts (employers, projects, numbers) that aren't in my "
+            "background. When my background doesn't cover the question, just answer it confidently "
+            "from solid expertise - no disclaimers about what my background does or doesn't contain."
         )
         if self.is_interview:
             base += (

@@ -105,7 +105,7 @@ class OpenAIProvider(BaseLLMProvider):
     @staticmethod
     def _is_reasoning_model(model: str) -> bool:
         """
-        GPT-5, o1, o3, o4 reasoning models no longer accept `max_tokens` or a non-default
+        GPT-5/GPT-6, o1, o3, o4 reasoning models no longer accept `max_tokens` or a non-default
         `temperature`; they use `max_completion_tokens` and only support temperature=1.
         """
         if not model:
@@ -113,10 +113,24 @@ class OpenAIProvider(BaseLLMProvider):
         lower = model.lower()
         return (
             lower.startswith("gpt-5")
+            or lower.startswith("gpt-6")
             or lower.startswith("o1")
             or lower.startswith("o3")
             or lower.startswith("o4")
         )
+
+    @staticmethod
+    def _effort_for(model: str, effort: str) -> str:
+        """Map the configured effort to the lowest value the model accepts: original
+        gpt-5 has no "none" (lowest is "minimal"), o-series lowest is "low"."""
+        if effort != "none":
+            return effort
+        lower = (model or "").lower()
+        if lower.startswith(("o1", "o3", "o4")):
+            return "low"
+        if lower.startswith("gpt-5") and not lower.startswith(("gpt-5.1", "gpt-5.2", "gpt-5.3", "gpt-5.4", "gpt-5.5")):
+            return "minimal"
+        return effort
 
     def _build_chat_kwargs(
         self,
@@ -135,7 +149,11 @@ class OpenAIProvider(BaseLLMProvider):
             # gpt-5 / o-series only accept `max_completion_tokens` (not `max_tokens`) and
             # reject non-default `temperature`. We pass the new param via `extra_body` so it
             # works even on older openai SDKs (<1.35) that don't yet know the keyword.
-            kwargs["extra_body"] = {"max_completion_tokens": max_tokens}
+            extra: Dict[str, Any] = {"max_completion_tokens": max_tokens}
+            effort = self._effort_for(model, settings.OPENAI_REASONING_EFFORT)
+            if effort:
+                extra["reasoning_effort"] = effort
+            kwargs["extra_body"] = extra
         else:
             kwargs["max_tokens"] = max_tokens
             kwargs["temperature"] = temperature
@@ -240,7 +258,6 @@ class AnthropicProvider(BaseLLMProvider):
             "model": model,
             "messages": ant_messages,
             "max_tokens": max_tokens,
-            "temperature": temperature,
         }
         if system_prompt:
             kwargs["system"] = system_prompt
@@ -265,7 +282,6 @@ class AnthropicProvider(BaseLLMProvider):
             "model": model,
             "messages": ant_messages,
             "max_tokens": max_tokens,
-            "temperature": temperature,
         }
         if system_prompt:
             kwargs["system"] = system_prompt
@@ -654,6 +670,17 @@ class LLMRouter:
         max_tokens = max_tokens or settings.LLM_MAX_TOKENS
         temperature = temperature or settings.LLM_TEMPERATURE
 
+        # Race path: fire every race provider at once and stream the first to answer.
+        # Only skipped when the client explicitly picked a provider outside the race.
+        if settings.LLM_RACE_ENABLED and (not provider or provider in settings.LLM_RACE_PROVIDERS):
+            candidates = self._race_candidates(provider, api_key)
+            if len(candidates) >= 2:
+                async for token in self._race_stream(
+                    candidates, messages, max_tokens, temperature, system_prompt
+                ):
+                    yield token
+                return
+
         # Per-request override path — user explicitly chose this provider, so no failover.
         if provider and api_key:
             prov = self._build_provider_on_demand(provider)
@@ -718,6 +745,114 @@ class LLMRouter:
                 errors.append(f"{name}: {e}")
 
         raise AllProvidersFailedError(f"All streaming providers failed: {'; '.join(errors)}")
+
+    def _race_candidates(
+        self, provider: Optional[str], api_key: Optional[str]
+    ) -> List[tuple]:
+        """
+        Build (name, provider, api_key_override, model) for each usable race provider.
+        A client-supplied key is used for the provider it belongs to; every other
+        provider uses its server-side .env key (skipped if it has none).
+        """
+        race_models = {
+            "openai": settings.LLM_RACE_OPENAI_MODEL,
+            "anthropic": settings.LLM_RACE_ANTHROPIC_MODEL,
+        }
+        candidates = []
+        for name in settings.LLM_RACE_PROVIDERS:
+            if name not in _PROVIDER_REGISTRY:
+                continue
+            key = api_key if (api_key and provider == name) else None
+            if key:
+                prov = self._build_provider_on_demand(name)
+            elif name in self._providers:
+                prov = self._providers[name]
+            else:
+                continue
+            candidates.append((name, prov, key, race_models.get(name)))
+        return candidates
+
+    async def _race_stream(
+        self,
+        candidates: List[tuple],
+        messages: List[LLMMessage],
+        max_tokens: int,
+        temperature: float,
+        system_prompt: Optional[str],
+    ) -> AsyncGenerator[str, None]:
+        """
+        Start every candidate's stream concurrently; the first to produce a token wins
+        and is streamed to completion, the rest are cancelled and closed. A candidate
+        that errors before its first token is dropped; fails only if all candidates do.
+        """
+        start = time.perf_counter()
+        # Nothing to fail over to after a race, so allow the full provider timeout; the
+        # short first-token deadline would only abort cold (first-call) connections.
+        deadline = start + settings.LLM_PROVIDER_TIMEOUT_SECONDS
+        gens: Dict[str, Any] = {}
+        pending: Dict[asyncio.Future, str] = {}
+        for name, prov, key, model in candidates:
+            gen = prov.generate_stream(
+                messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system_prompt=system_prompt,
+                api_key_override=key,
+                model_override=model,
+            )
+            gens[name] = gen
+            pending[asyncio.ensure_future(gen.__anext__())] = name
+
+        winner: Optional[str] = None
+        first_token = ""
+        errors: List[str] = []
+        try:
+            while pending and winner is None:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+                done, _ = await asyncio.wait(
+                    list(pending.keys()), timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                for task in done:
+                    name = pending.pop(task)
+                    try:
+                        token = task.result()
+                    except StopAsyncIteration:
+                        errors.append(f"{name}: empty response")
+                        continue
+                    except Exception as e:
+                        logger.warning(f"LLM race: {name} failed before first token: {e}")
+                        errors.append(f"{name}: {e}")
+                        continue
+                    if winner is None:
+                        winner, first_token = name, token
+        finally:
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending.keys(), return_exceptions=True)
+            for name, gen in gens.items():
+                if name != winner:
+                    try:
+                        await gen.aclose()
+                    except Exception:
+                        pass
+
+        if winner is None:
+            for name in pending.values():
+                errors.append(f"{name}: timed out")
+            raise AllProvidersFailedError(f"All race providers failed: {'; '.join(errors)}")
+
+        logger.info(
+            f"LLM race winner={winner} first_token_ms={int((time.perf_counter() - start) * 1000)}"
+        )
+        yield first_token
+        async for token in gens[winner]:
+            yield token
 
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings (uses OpenAI preferentially)."""

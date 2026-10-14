@@ -109,6 +109,13 @@ class DeepgramLiveTranscriptionService:
         #  _record_final(text) -> store a (speaker) final so the mic side can compare.
         self._echo_check: Optional[Callable[[str], bool]] = None
         self._record_final: Optional[Callable[[str], None]] = None
+        # Other-party stream: answer each utterance when it ends (full sentence, any
+        # content) and pre-empt whatever answer is streaming. _preempt_hook(task) cancels
+        # every in-flight AI task except `task` (wired by DualDeepgramSession).
+        self.answer_on_utterance_end = False
+        self._preempt_hook: Optional[Callable] = None
+        self._finalize_sent = False
+        self.idle_finalize_task: Optional[asyncio.Task] = None
         
         # Message management
         self.messages: List[AudioMessage] = []
@@ -203,6 +210,9 @@ class DeepgramLiveTranscriptionService:
 
             # Start keepalive loop (prevents 1011 idle-timeout disconnects)
             self.keepalive_task = asyncio.create_task(self._keepalive_loop())
+
+            if self.answer_on_utterance_end:
+                self.idle_finalize_task = asyncio.create_task(self._idle_finalize_loop())
             
             return True
             
@@ -250,6 +260,7 @@ class DeepgramLiveTranscriptionService:
                 return False
 
             self.last_audio_time = time.time()
+            self._finalize_sent = False
             
             # Add to buffer
             self.audio_buffer += audio_data
@@ -334,6 +345,40 @@ class DeepgramLiveTranscriptionService:
             except Exception as e:
                 logger.error(f"Keepalive loop error: {e}")
     
+    async def _idle_finalize_loop(self):
+        """
+        System audio usually stops delivering packets the moment the other party goes
+        quiet, so Deepgram never hears the trailing silence it needs to endpoint - the
+        utterance (and its answer) would hang until they speak again. Once audio has
+        been idle for LIVE_SPEAKER_IDLE_FINALIZE_SECONDS with an utterance in progress,
+        flush and send Finalize; if Deepgram still hasn't closed the utterance shortly
+        after, endpoint it ourselves.
+        """
+        idle_s = settings.LIVE_SPEAKER_IDLE_FINALIZE_SECONDS
+        while self.is_connected:
+            try:
+                await asyncio.sleep(0.1)
+                if self.current_message is None or not self.ws_client or not self.last_audio_time:
+                    continue
+                idle = time.time() - self.last_audio_time
+                if not self._finalize_sent and idle >= idle_s:
+                    from deepgram.extensions.types.sockets.listen_v1_control_message import (
+                        ListenV1ControlMessage,
+                    )
+                    if self.audio_buffer:
+                        self.ws_client.send_media(self.audio_buffer)
+                        self.audio_buffer = b''
+                    self.ws_client.send_control(ListenV1ControlMessage(type="Finalize"))
+                    self.last_send_time = time.time()
+                    self._finalize_sent = True
+                    logger.debug(f"Sent Finalize after {idle:.2f}s idle ({self.source})")
+                elif self._finalize_sent and idle >= idle_s + 1.0:
+                    await self._handle_endpoint()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"Idle finalize loop error ({self.source}): {e}")
+
     async def _receive_loop(self):
         """
         Receive messages from Deepgram WebSocket
@@ -526,15 +571,19 @@ class DeepgramLiveTranscriptionService:
             # Runs as a background task so streaming the AI answer never blocks
             # the Deepgram receive loop (keeps transcripts real-time). Skipped if
             # a previous AI answer is still streaming to avoid interleaved output.
-            if is_final and self._ai_pipeline_enabled and self._keyword_detector:
+            if (
+                is_final and not self.answer_on_utterance_end
+                and self._ai_pipeline_enabled and self._keyword_detector
+            ):
                 if self.ai_task is None or self.ai_task.done():
                     self.ai_task = asyncio.create_task(self._run_detection_pipeline(transcript))
                 else:
                     logger.debug("AI pipeline busy, skipping trigger for this segment")
 
-            # Deepgram sets speech_final once endpointing silence is reached:
-            # finalize the message so the next speech starts a fresh one.
-            if speech_final:
+            # Deepgram sets speech_final once endpointing silence is reached (and
+            # from_finalize on the reply to our idle Finalize): finalize the message so
+            # the next speech starts a fresh one.
+            if speech_final or (is_final and data.get("from_finalize")):
                 await self._handle_endpoint()
 
         except Exception as e:
@@ -549,12 +598,23 @@ class DeepgramLiveTranscriptionService:
             if self.current_message:
                 self.current_message.is_final = True
                 finalized = self.current_message.to_dict()
+                utterance = " ".join(self.current_final_parts).strip()
                 logger.info(f"Endpointed message {self.current_message.message_id}")
 
                 # Reset for next message BEFORE notifying, so a callback failure
                 # can never leak the old message into the next utterance
                 self.current_message = None
                 self.current_final_parts = []
+                self._finalize_sent = False
+
+                if (
+                    self.answer_on_utterance_end and utterance
+                    and self._ai_pipeline_enabled and self._keyword_detector
+                ):
+                    previous = self.ai_task
+                    self.ai_task = asyncio.create_task(
+                        self._run_detection_pipeline(utterance, preempt=True, previous=previous)
+                    )
 
                 # Notify callback
                 if self.on_transcript_callback:
@@ -568,32 +628,61 @@ class DeepgramLiveTranscriptionService:
         except Exception as e:
             logger.exception(f"Endpoint handling error: {e}")
     
-    async def _run_detection_pipeline(self, transcript: str):
+    def _detect(self, transcript: str, force_statement: bool):
+        detection = self._keyword_detector.detect(transcript, is_final=True, source=self.source)
+        if (
+            not detection.triggered and force_statement
+            and settings.LIVE_SPEAKER_ANSWER_ALL
+            and len(transcript.split()) >= settings.LIVE_SPEAKER_MIN_WORDS
+        ):
+            from services.keyword_service import DetectionResult
+            detection = DetectionResult(
+                triggered=True, trigger_type="speaker_utterance",
+                original_text=transcript, confidence=0.5,
+            )
+        return detection
+
+    async def _run_detection_pipeline(
+        self, transcript: str, preempt: bool = False, previous: Optional[asyncio.Task] = None
+    ):
         """
         Run keyword/question detection on a final transcript segment.
         If triggered, build context and stream AI suggestion back to client.
+
+        preempt (other-party utterances): any answer already streaming - on either
+        stream - is cancelled so the newest thing the other person said is answered
+        immediately instead of being skipped.
         """
-        # If the other stream is already streaming an answer, skip this trigger so the
-        # two streams never produce interleaved AI output.
-        if self._ai_lock is not None and self._ai_lock.locked():
+        detection = self._detect(transcript, force_statement=preempt)
+        if not detection.triggered:
+            return
+
+        if preempt:
+            if previous is not None and not previous.done():
+                previous.cancel()
+                await asyncio.gather(previous, return_exceptions=True)
+            if self._preempt_hook is not None:
+                try:
+                    await self._preempt_hook()
+                except Exception as e:
+                    logger.debug(f"Pre-empt hook error: {e}")
+        elif self._ai_lock is not None and self._ai_lock.locked():
+            # Mic triggers never interrupt an answer that is already streaming.
             logger.debug(f"AI busy on the other stream, skipping trigger ({self.source})")
             return
 
+        acquired = False
         if self._ai_lock is not None:
             await self._ai_lock.acquire()
+            acquired = True
         try:
-            await self._run_detection_pipeline_inner(transcript)
+            await self._run_detection_pipeline_inner(transcript, detection)
         finally:
-            if self._ai_lock is not None and self._ai_lock.locked():
+            if acquired:
                 self._ai_lock.release()
 
-    async def _run_detection_pipeline_inner(self, transcript: str):
+    async def _run_detection_pipeline_inner(self, transcript: str, detection):
         try:
-            detection = self._keyword_detector.detect(transcript, is_final=True)
-            
-            if not detection.triggered:
-                return
-            
             logger.info(
                 f"AI pipeline triggered: {detection.trigger_type} "
                 f"(questions={detection.questions}, keywords={detection.keywords_matched})"
@@ -623,19 +712,20 @@ class DeepgramLiveTranscriptionService:
             experience_searched = False
             try:
                 from services.rag_service import rag_service
-                rag_task = rag_service.search(question, top_k=3, username=self.username)
-                exp_task = rag_service.search_experience(question, top_k=4, username=self.username)
-                mem_task = rag_service.search_user_memory(question, top_k=2, username=self.username or "")
                 experience_searched = True
-                rag_chunks, experience_chunks, memory_chunks = await asyncio.wait_for(
-                    asyncio.gather(rag_task, exp_task, mem_task, return_exceptions=True),
-                    timeout=0.8,
-                )
-                rag_chunks = rag_chunks if isinstance(rag_chunks, list) else []
-                experience_chunks = experience_chunks if isinstance(experience_chunks, list) else []
-                memory_chunks = memory_chunks if isinstance(memory_chunks, list) else []
+                if rag_service.has_searchable_data(self.username):
+                    rag_task = rag_service.search(question, top_k=3, username=self.username)
+                    exp_task = rag_service.search_experience(question, top_k=4, username=self.username)
+                    mem_task = rag_service.search_user_memory(question, top_k=2, username=self.username or "")
+                    rag_chunks, experience_chunks, memory_chunks = await asyncio.wait_for(
+                        asyncio.gather(rag_task, exp_task, mem_task, return_exceptions=True),
+                        timeout=0.3,
+                    )
+                    rag_chunks = rag_chunks if isinstance(rag_chunks, list) else []
+                    experience_chunks = experience_chunks if isinstance(experience_chunks, list) else []
+                    memory_chunks = memory_chunks if isinstance(memory_chunks, list) else []
             except asyncio.TimeoutError:
-                logger.debug("RAG/experience search timed out (>800ms), skipping for latency")
+                logger.debug("RAG/experience search timed out (>300ms), skipping for latency")
             except Exception as e:
                 logger.debug(f"RAG/experience search skipped: {e}")
 
@@ -719,6 +809,14 @@ class DeepgramLiveTranscriptionService:
                     except Exception as e:
                         logger.warning(f"ai.suggestion.end callback failed: {e}")
 
+                except asyncio.CancelledError:
+                    # Pre-empted by a newer utterance (or the user hit Stop): close this
+                    # answer card on the client before the next one starts.
+                    try:
+                        await self.on_ai_suggestion_callback({"type": "ai.suggestion.end"})
+                    except Exception:
+                        pass
+                    raise
                 except Exception as e:
                     logger.error(f"AI suggestion streaming error: {e}")
                     try:
@@ -830,6 +928,13 @@ class DeepgramLiveTranscriptionService:
                 self.keepalive_task.cancel()
                 try:
                     await self.keepalive_task
+                except asyncio.CancelledError:
+                    pass
+
+            if self.idle_finalize_task:
+                self.idle_finalize_task.cancel()
+                try:
+                    await self.idle_finalize_task
                 except asyncio.CancelledError:
                     pass
             
@@ -948,6 +1053,10 @@ class DualDeepgramSession:
         # Wire echo suppression: mic transcripts are checked against speaker finals.
         self.mic._echo_check = self._is_echo
         self.speaker._record_final = self._record_speaker_final
+        # The other party's speech is answered the moment each utterance ends and
+        # takes priority over an answer still streaming for the user's own speech.
+        self.speaker.answer_on_utterance_end = True
+        self.speaker._preempt_hook = self.mic.cancel_ai
 
     @staticmethod
     def _normalize(text: str) -> str:

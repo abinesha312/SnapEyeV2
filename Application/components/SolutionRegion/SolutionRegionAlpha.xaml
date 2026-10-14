@@ -27,17 +27,17 @@
         </Style>
         <!-- Code blocks -->
         <Style x:Key="CodeBlockStyle" TargetType="Section">
-            <Setter Property="Background" Value="#10FFFFFF"/>
+            <Setter Property="Background" Value="#030712"/>
             <Setter Property="Foreground" Value="#E5E7EB"/>
-            <Setter Property="BorderBrush" Value="#2563EB"/>
+            <Setter Property="BorderBrush" Value="#1E293B"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="8,6"/>
             <Setter Property="Margin" Value="0,2,0,4"/>
         </Style>
         <!-- Inline code -->
         <Style x:Key="CodeStyle" TargetType="Inline">
-            <Setter Property="Background" Value="#15FFFFFF"/>
-            <Setter Property="Foreground" Value="#60A5FA"/>
+            <Setter Property="Background" Value="#1E293B"/>
+            <Setter Property="Foreground" Value="#38BDF8"/>
             <Setter Property="FontFamily" Value="Cascadia Code, Consolas, Courier New"/>
         </Style>
         <!-- List items compact -->
@@ -109,7 +109,7 @@
                 <StackPanel x:Name="ChatHistoryPanel">
                     <TextBlock x:Name="ChatPlaceholder"
                                Text="Ask anything, pick a quick action, or start listening — your conversation will appear here."
-                               Foreground="#71717A" FontSize="12" FontStyle="Italic"
+                               Foreground="#94A3B8" FontSize="12" FontStyle="Italic"
                                FontFamily="Segoe UI" TextWrapping="Wrap"
                                Margin="4,12" HorizontalAlignment="Center"
                                TextAlignment="Center"/>
@@ -127,8 +127,8 @@
                 <Button.Template>
                     <ControlTemplate TargetType="Button">
                         <Border x:Name="JumpPill" CornerRadius="9999"
-                                Background="#2563EB" Padding="12,6"
-                                BorderBrush="#1D4ED8" BorderThickness="1">
+                                Background="#3B82F6" Padding="12,6"
+                                BorderBrush="#2563EB" BorderThickness="1">
                             <Border.Effect>
                                 <DropShadowEffect Color="#000000" BlurRadius="14" ShadowDepth="2" Opacity="0.45"/>
                             </Border.Effect>
@@ -143,7 +143,7 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="JumpPill" Property="Background" Value="#1D4ED8"/>
+                                <Setter TargetName="JumpPill" Property="Background" Value="#2563EB"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -168,7 +168,7 @@
                 <StackPanel x:Name="TranscriptionPanel" Margin="0">
                     <TextBlock x:Name="TranscriptPlaceholder"
                                Text="Start listening to see live transcription..."
-                               Foreground="#71717A" FontSize="11" FontStyle="Italic"
+                               Foreground="#94A3B8" FontSize="11" FontStyle="Italic"
                                FontFamily="Segoe UI"
                                Margin="4,8" HorizontalAlignment="Center"/>
                 </StackPanel>
@@ -186,8 +186,8 @@
                 <Button.Template>
                     <ControlTemplate TargetType="Button">
                         <Border x:Name="TranscriptJumpPill" CornerRadius="9999"
-                                Background="#2563EB" Padding="12,6"
-                                BorderBrush="#1D4ED8" BorderThickness="1">
+                                Background="#3B82F6" Padding="12,6"
+                                BorderBrush="#2563EB" BorderThickness="1">
                             <Border.Effect>
                                 <DropShadowEffect Color="#000000" BlurRadius="14" ShadowDepth="2" Opacity="0.45"/>
                             </Border.Effect>
@@ -202,7 +202,7 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="TranscriptJumpPill" Property="Background" Value="#1D4ED8"/>
+                                <Setter TargetName="TranscriptJumpPill" Property="Background" Value="#2563EB"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>

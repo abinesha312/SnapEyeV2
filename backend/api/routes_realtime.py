@@ -32,7 +32,7 @@ router = APIRouter(
 @router.websocket("/audio")
 async def audio_transcribe(
     websocket: WebSocket,
-    token: str = Query(..., description="JWT authentication token"),
+    token: str = Query("", description="JWT authentication token (optional when AUTH_ENABLED=false)"),
     model: str = Query("nova-3", description="Deepgram model (nova-3, nova-2, nova, base, enhanced)"),
     language: str = Query(settings.DEEPGRAM_LANGUAGE, description="Language code (en, es, fr, etc.)"),
     endpointing_ms: int = Query(300, description="Endpointing threshold in milliseconds (default: 300ms)")

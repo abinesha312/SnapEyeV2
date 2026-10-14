@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -60,12 +61,11 @@ namespace SnapEye.Services
         public async Task StreamResponseAsync(
             string userMessage,
             string? systemPrompt = null,
-            string? provider = null)
+            string? provider = null,
+            IReadOnlyList<(string Role, string Content)>? history = null)
         {
-            var messages = new[]
-            {
-                new { role = "user", content = userMessage }
-            };
+            var messages = ToWireHistory(history);
+            messages.Add(new { role = "user", content = userMessage });
 
             var (activeProvider, activeModel, activeKey) = ResolveAiCredentials(provider);
 
@@ -95,7 +95,10 @@ namespace SnapEye.Services
             string jobDescription = "",
             string company = "",
             string role = "",
-            string mode = "")
+            string mode = "",
+            IReadOnlyList<(string Role, string Content)>? history = null,
+            bool quickAction = false,
+            bool expand = false)
         {
             var (activeProvider, activeModel, activeKey) = ResolveAiCredentials(provider);
 
@@ -114,9 +117,21 @@ namespace SnapEye.Services
                 company = company,
                 role = role,
                 mode = mode,
+                history = ToWireHistory(history),
+                quick_action = quickAction,
+                expand = expand,
             };
 
             await StreamFromEndpointAsync("/api/llm/context-stream", payload).ConfigureAwait(false);
+        }
+
+        private static List<object> ToWireHistory(IReadOnlyList<(string Role, string Content)>? history)
+        {
+            var list = new List<object>();
+            if (history == null) return list;
+            foreach (var (r, c) in history)
+                list.Add(new { role = r, content = c });
+            return list;
         }
 
         /// <summary>

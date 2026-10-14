@@ -117,6 +117,26 @@ class Settings(BaseSettings):
     # produced anything by this deadline the attempt is abandoned and retried/failed-
     # over immediately rather than leaving the user staring at a spinner.
     LLM_FIRST_TOKEN_TIMEOUT_SECONDS: float = 3.0
+
+    # Provider race: send each streaming request to every provider listed here at
+    # once and stream whichever produces the first token; the others are cancelled.
+    # Authentication switch. When False, every endpoint and WebSocket accepts requests
+    # without (or with an invalid/expired) token and acts as AUTH_DEFAULT_USER.
+    # Set AUTH_ENABLED=true in .env to turn it back on.
+    AUTH_ENABLED: bool = False
+    AUTH_DEFAULT_USER: str = "snapeye_user"
+
+    LLM_RACE_ENABLED: bool = True
+    LLM_RACE_PROVIDERS: list = ["openai", "anthropic"]
+    LLM_RACE_OPENAI_MODEL: str = "gpt-6-luna"
+    LLM_RACE_ANTHROPIC_MODEL: str = "claude-haiku-4-5-20251001"
+    # reasoning_effort sent to OpenAI reasoning models (gpt-5/gpt-6/o-series).
+    # "none" = no hidden thinking before the first token (gpt-6 supports none/low/...).
+    OPENAI_REASONING_EFFORT: str = "none"
+    # Output cap for quick actions / context answers (prompt asks for ~220 words).
+    LLM_QUICK_MAX_TOKENS: int = 700
+    LLM_QUICK_ACTION_MAX_TOKENS: int = 220
+    LLM_EXPAND_MAX_TOKENS: int = 900  # "Explain more": 250-400 word read
     
     # RAG Configuration
     RAG_CHUNK_SIZE: int = 500  # tokens per chunk
@@ -148,6 +168,13 @@ class Settings(BaseSettings):
     
     # Keyword Detection
     KEYWORD_DEBOUNCE_MS: int = 800  # minimum ms between triggers
+    # Other-party (system audio) speech: answer every utterance as soon as it ends, not
+    # only detected questions, and let it pre-empt an in-flight answer.
+    LIVE_SPEAKER_ANSWER_ALL: bool = True
+    LIVE_SPEAKER_MIN_WORDS: int = 3
+    # Force Deepgram to finalize speaker speech after this much audio silence/idle
+    # (system audio often stops sending packets entirely, so endpointing never fires).
+    LIVE_SPEAKER_IDLE_FINALIZE_SECONDS: float = 0.6
     
     # Storage
     SQLITE_DB_PATH: str = "./data/snapeye.db"

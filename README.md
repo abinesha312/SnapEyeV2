@@ -1,6 +1,20 @@
 # 👁️ SnapEye AI - Real-time Vision & Transcription Platform
 
 **Enterprise-grade AI-powered meeting assistant with live transcription, screen capture OCR, and contextual AI suggestions.**
+Design an In-Memory File System.
+- I gave my understanding of a file system.
+- Named a few public APIs we'd need - create(), delete(), ls(), mkdir().
+- Then coded 3 of the functions.
+- The interviewer asked me about the underlying DSA.
+- To which I answered Trie and explained how it models nested directories.
+- Also touched on Composite, Factory and Singleton design patterns.
+
+This round went well.
+
+4️⃣Round 4: HLD
+Design a notification service to send Emails and SMS.
+- I designed the overall system, APIs, queues, workers, retries, etc.
+- Later, the interviewer said that what I have made is fine but they wanted focus on different notification types: Urgent, Promotional and Transactional.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![.NET](https://img.shields.io/badge/.NET-8.0-512BD4)](https://dotnet.microsoft.com/)

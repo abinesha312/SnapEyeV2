@@ -15,10 +15,16 @@ namespace SnapEye.Config
     public static class AppConfig
     {
         // === Backend ===
-        public static string BackendHttpUrl { get; set; } = "http://localhost:8080";
-        public static string BackendWebSocketUrl { get; set; } = "ws://localhost:8080";
+        public static string BackendHttpUrl { get; set; } = "http://127.0.0.1:8080";
+        public static string BackendWebSocketUrl { get; set; } = "ws://127.0.0.1:8080";
 
         // === Auth ===
+        /// <summary>
+        /// When false the Dashboard never shows the login form: it signs in silently with
+        /// <see cref="DefaultUsername"/>/<see cref="DefaultApiKey"/> (the backend also
+        /// accepts requests without a token when its AUTH_ENABLED is false).
+        /// </summary>
+        public static bool AuthEnabled { get; set; } = false;
         public static string DefaultUsername { get; set; } = "snapeye_user";
         public static string DefaultApiKey { get; set; } = "sk-test-api-key-1234567890";
         public static int SessionExpiryDays { get; set; } = 90;
@@ -170,6 +176,7 @@ namespace SnapEye.Config
             // Auth
             if (config.TryGetValue("auth", out var authObj) && authObj is Dictionary<object, object> auth)
             {
+                AuthEnabled = GetBool(auth, "enabled", AuthEnabled);
                 DefaultUsername = GetString(auth, "default_username", DefaultUsername);
                 DefaultApiKey = GetString(auth, "default_api_key", DefaultApiKey);
                 SessionExpiryDays = GetInt(auth, "session_expiry_days", SessionExpiryDays);
@@ -250,6 +257,7 @@ namespace SnapEye.Config
                         {
                             Label = GetString(qaDict, "label", "Action"),
                             Prompt = GetString(qaDict, "prompt", ""),
+                            Expand = GetBool(qaDict, "expand", false),
                         });
                     }
                 }
@@ -302,9 +310,8 @@ namespace SnapEye.Config
             QuickActions.AddRange(new[]
             {
                 new QuickActionConfig { Label = "What should I say?", Prompt = "Based on the conversation transcript, suggest what I should say next. Be specific and actionable." },
+                new QuickActionConfig { Label = "Explain more", Expand = true, Prompt = "Expand your previous answer: turn each point into a short paragraph a person could read aloud in 1-2 minutes. Keep the same points and order; add the reasoning and one concrete example per point. No deep technical detail." },
                 new QuickActionConfig { Label = "Follow up", Prompt = "Based on the conversation transcript, suggest 2-3 follow-up questions I could ask." },
-                new QuickActionConfig { Label = "Fact check", Prompt = "Review the conversation transcript and verify any facts or claims that were mentioned. Highlight anything that may need checking." },
-                new QuickActionConfig { Label = "Who am I talking to?", Prompt = "Based on the conversation transcript, identify who I am talking to and any details about them." },
                 new QuickActionConfig { Label = "Recap", Prompt = "Provide a brief recap of the conversation so far, including key topics discussed and any decisions made." },
             });
         }
@@ -412,5 +419,10 @@ namespace SnapEye.Config
     {
         public string Label { get; set; } = "";
         public string Prompt { get; set; } = "";
+        /// <summary>
+        /// Expands the previous AI answer into a longer read (1-2 minutes) instead of
+        /// producing a new short quick-action answer.
+        /// </summary>
+        public bool Expand { get; set; }
     }
 }

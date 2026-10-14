@@ -29,6 +29,12 @@ namespace SnapEye.Services
         // Silence threshold - audio below this level is considered silence
         private const float SilenceThreshold = 0.001f;
 
+        // Silence right after speech is still forwarded (up to this long) so Deepgram
+        // hears the pause and endpoints the other party's utterance immediately; longer
+        // silence is dropped to avoid streaming dead air.
+        private const double SilenceTailMaxMs = 1000;
+        private double silenceTailSentMs = SilenceTailMaxMs;
+
         public event EventHandler<SpeakerAudioEventArgs>? AudioDataAvailable;
         public event EventHandler<string>? ErrorOccurred;
         public event EventHandler<string>? StatusChanged;
@@ -152,14 +158,19 @@ namespace SnapEye.Services
                     Buffer.BlockCopy(e.Buffer, 0, pcmData, 0, e.BytesRecorded);
                 }
 
-                // Check if audio is silence
-                if (IsSilence(pcmData))
+                bool silent = IsSilence(pcmData);
+                if (silent && silenceTailSentMs >= SilenceTailMaxMs)
                 {
-                    return; // Skip silent audio
+                    return;
                 }
 
                 // Convert to target format (24kHz, mono, 16-bit)
                 byte[] convertedAudio = ConvertToTargetFormat(pcmData, sourceFormat);
+
+                if (silent)
+                    silenceTailSentMs += convertedAudio.Length * 1000.0 / (TargetSampleRate * 2);
+                else
+                    silenceTailSentMs = 0;
 
                 if (convertedAudio.Length > 0)
                 {

@@ -78,18 +78,29 @@ async def lifespan(app: FastAPI):
     # client construction, and internal setup that only happens on the first actual
     # call). A single 1-token completion is the only reliable way to warm all of
     # that - constructing the client alone left ~3s of latency on the first real call.
+    # When racing, every race provider is warmed (in parallel) since any of them may win.
+    async def _warm_one(name, prov, model):
+        from services.llm_router import LLMMessage
+        try:
+            await prov.generate(
+                [LLMMessage(role="user", content="Hi")],
+                max_tokens=16,
+                model_override=model,
+            )
+            logger.info(f"Warmed LLM provider: {name} ({model or 'default model'})")
+        except Exception as e:
+            logger.debug(f"LLM provider warm-up skipped for {name}: {e}")
+
     async def _warm_primary_provider():
         try:
-            from services.llm_router import llm_router, LLMMessage
-            provider_name = llm_router.available_providers[0] if llm_router.available_providers else None
-            if not provider_name:
-                return
-            await llm_router.generate(
-                [LLMMessage(role="user", content="Hi")],
-                max_tokens=1,
-                provider=None,
-            )
-            logger.info(f"Warmed LLM provider: {provider_name}")
+            from services.llm_router import llm_router
+            targets = []
+            if settings.LLM_RACE_ENABLED:
+                targets = [(n, p, m) for n, p, _k, m in llm_router._race_candidates(None, None)]
+            if not targets and llm_router.available_providers:
+                name = llm_router.available_providers[0]
+                targets = [(name, llm_router._providers[name], None)]
+            await asyncio.gather(*(_warm_one(n, p, m) for n, p, m in targets))
         except Exception as e:
             logger.debug(f"LLM provider warm-up skipped: {e}")
 

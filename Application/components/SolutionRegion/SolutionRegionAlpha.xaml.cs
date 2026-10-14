@@ -76,19 +76,25 @@ namespace SnapEye.SolutionRegion
         // (~1s) pause no longer fragments speech into many bubbles.
         private const double GapSecondsForNewBubble = 3.0;
 
-        // Theme colors (You = blue, Other = gray, AI = green for transcript / dark card for chat)
+        // Theme colors (slate/sky palette). Text contrast on each fill is >= 4.5:1.
+        // You: blue fill. The brighter #3B82F6 is the border - as a fill it would only give
+        // white text a 3.7:1 contrast.
         private static readonly Color UserBubbleColor   = (Color)ColorConverter.ConvertFromString("#2563EB");
-        private static readonly Color UserBorderColor   = (Color)ColorConverter.ConvertFromString("#1D4ED8");
-        private static readonly Color SystemBubbleColor = (Color)ColorConverter.ConvertFromString("#4B5563");
-        private static readonly Color SystemBorderColor = (Color)ColorConverter.ConvertFromString("#374151");
-        private static readonly Color AIBubbleColor     = (Color)ColorConverter.ConvertFromString("#16A34A");
-        private static readonly Color AIBorderColor     = (Color)ColorConverter.ConvertFromString("#15803D");
+        private static readonly Color UserBorderColor   = (Color)ColorConverter.ConvertFromString("#3B82F6");
+        private static readonly Color UserTextColor     = (Color)ColorConverter.ConvertFromString("#FFFFFF");
+        // Other speaker (system audio)
+        private static readonly Color SystemBubbleColor = (Color)ColorConverter.ConvertFromString("#1E293B");
+        private static readonly Color SystemBorderColor = (Color)ColorConverter.ConvertFromString("#334155");
+        private static readonly Color SystemTextColor   = (Color)ColorConverter.ConvertFromString("#E2E8F0");
+        // AI answer bubble
+        private static readonly Color AIBubbleColor     = (Color)ColorConverter.ConvertFromString("#0F172A");
+        private static readonly Color AIBorderColor     = (Color)ColorConverter.ConvertFromString("#334155");
         private static readonly Color BubbleTextColor   = (Color)ColorConverter.ConvertFromString("#F8FAFC");
 
-        // Chat answer card (dark subtle background, not green — reserved for richer markdown)
-        private static readonly Color AnswerCardFill   = (Color)ColorConverter.ConvertFromString("#1F2937");
-        private static readonly Color AnswerCardBorder = (Color)ColorConverter.ConvertFromString("#334155");
-        private static readonly Color AnswerAccent     = (Color)ColorConverter.ConvertFromString("#60A5FA");
+        // AI answer card (chat view and AI transcript bubbles)
+        private static readonly Color AnswerCardFill   = (Color)ColorConverter.ConvertFromString("#0F172A");
+        private static readonly Color AnswerCardBorder = (Color)ColorConverter.ConvertFromString("#1E293B");
+        private static readonly Color AnswerAccent     = (Color)ColorConverter.ConvertFromString("#38BDF8");
 
         public SolutionRegionAlpha()
         {
@@ -489,7 +495,7 @@ namespace SnapEye.SolutionRegion
 
         /// <summary>
         /// Small pill showing the backend-reported answer confidence (0..1). Grounded,
-        /// high-confidence answers render green; softer ones amber.
+        /// high-confidence answers render green, medium amber, low red (12% fill / 30% border).
         /// </summary>
         private static Border BuildConfidenceBadge(double confidence)
         {
@@ -497,15 +503,15 @@ namespace SnapEye.SolutionRegion
             Color fill, edge, text;
             if (confidence >= 0.85)
             {
-                fill = Color.FromRgb(0x1B, 0x3A, 0x2A); edge = Color.FromRgb(0x2E, 0x7D, 0x54); text = Color.FromRgb(0x86, 0xEF, 0xAC);
+                fill = Color.FromArgb(0x1F, 0x10, 0xB9, 0x81); edge = Color.FromArgb(0x4D, 0x10, 0xB9, 0x81); text = Color.FromRgb(0x34, 0xD3, 0x99);
             }
             else if (confidence >= 0.7)
             {
-                fill = Color.FromRgb(0x3A, 0x33, 0x1B); edge = Color.FromRgb(0x8A, 0x6D, 0x2E); text = Color.FromRgb(0xFD, 0xE0, 0x47);
+                fill = Color.FromArgb(0x1F, 0xF5, 0x9E, 0x0B); edge = Color.FromArgb(0x4D, 0xF5, 0x9E, 0x0B); text = Color.FromRgb(0xFB, 0xBF, 0x24);
             }
             else
             {
-                fill = Color.FromRgb(0x2A, 0x2A, 0x33); edge = Color.FromRgb(0x55, 0x55, 0x63); text = Color.FromRgb(0xC7, 0xC3, 0xD1);
+                fill = Color.FromArgb(0x1F, 0xEF, 0x44, 0x44); edge = Color.FromArgb(0x4D, 0xEF, 0x44, 0x44); text = Color.FromRgb(0xF8, 0x71, 0x71);
             }
 
             return new Border
@@ -533,10 +539,11 @@ namespace SnapEye.SolutionRegion
         // UserControl resources. The only reliable override point is each viewer's own
         // Resources dictionary (confirmed by the library author), so we inject a dark
         // code theme there. Styles are immutable once built, so we share single instances.
-        private static readonly Color CodeBg       = (Color)ColorConverter.ConvertFromString("#0D1117");
-        private static readonly Color CodeFg       = (Color)ColorConverter.ConvertFromString("#E6EDF3");
-        private static readonly Color InlineCodeBg = (Color)ColorConverter.ConvertFromString("#30363D");
-        private static readonly Color InlineCodeFg = (Color)ColorConverter.ConvertFromString("#93C5FD");
+        private static readonly Color CodeBg       = (Color)ColorConverter.ConvertFromString("#030712");
+        private static readonly Color CodeFg       = (Color)ColorConverter.ConvertFromString("#E5E7EB");
+        private static readonly Color CodeBorder   = (Color)ColorConverter.ConvertFromString("#1E293B");
+        private static readonly Color InlineCodeBg = (Color)ColorConverter.ConvertFromString("#1E293B");
+        private static readonly Color InlineCodeFg = (Color)ColorConverter.ConvertFromString("#38BDF8");
         private static readonly FontFamily MonoFont = new("Cascadia Code, Consolas, Courier New");
 
         private static Style? _codeBlockStyle;
@@ -555,7 +562,7 @@ namespace SnapEye.SolutionRegion
                     s.Setters.Add(new Setter(TextElement.FontSizeProperty, 12.5));
                     s.Setters.Add(new Setter(Block.PaddingProperty, new Thickness(10, 8, 10, 8)));
                     s.Setters.Add(new Setter(Block.MarginProperty, new Thickness(0, 4, 0, 6)));
-                    s.Setters.Add(new Setter(Block.BorderBrushProperty, new SolidColorBrush((Color)ColorConverter.ConvertFromString("#30363D"))));
+                    s.Setters.Add(new Setter(Block.BorderBrushProperty, new SolidColorBrush(CodeBorder)));
                     s.Setters.Add(new Setter(Block.BorderThicknessProperty, new Thickness(1)));
                     s.Setters.Add(new Setter(Block.LineHeightProperty, 17.0));
                     s.Seal();
@@ -584,8 +591,8 @@ namespace SnapEye.SolutionRegion
         {
             return new Border
             {
-                Background = new SolidColorBrush(Color.FromArgb(0x33, 0xDC, 0x26, 0x26)),
-                BorderBrush = new SolidColorBrush(Color.FromRgb(0xDC, 0x26, 0x26)),
+                Background = new SolidColorBrush(Color.FromArgb(0x26, 0xEF, 0x44, 0x44)),
+                BorderBrush = new SolidColorBrush(Color.FromRgb(0xEF, 0x44, 0x44)),
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(12),
                 Padding = new Thickness(12, 10, 12, 10),
@@ -594,7 +601,7 @@ namespace SnapEye.SolutionRegion
                 Child = new TextBlock
                 {
                     Text = "⚠ " + error,
-                    Foreground = new SolidColorBrush(Color.FromRgb(0xFE, 0xCA, 0xCA)),
+                    Foreground = new SolidColorBrush(Color.FromRgb(0xFC, 0xA5, 0xA5)),
                     FontSize = 13,
                     TextWrapping = TextWrapping.Wrap,
                     FontFamily = new FontFamily("Segoe UI")
@@ -616,7 +623,7 @@ namespace SnapEye.SolutionRegion
                 Child = new TextBlock
                 {
                     Text = text,
-                    Foreground = new SolidColorBrush(BubbleTextColor),
+                    Foreground = new SolidColorBrush(UserTextColor),
                     FontSize = 13,
                     LineHeight = 18,
                     TextWrapping = TextWrapping.Wrap,
@@ -918,8 +925,8 @@ namespace SnapEye.SolutionRegion
 
             return new Border
             {
-                Background = new SolidColorBrush(Color.FromArgb(0x33, 0x25, 0x63, 0xEB)),
-                BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2563EB")),
+                Background = new SolidColorBrush(Color.FromArgb(0x26, 0x3B, 0x82, 0xF6)),
+                BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#3B82F6")),
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(10),
                 Padding = new Thickness(10, 8, 10, 8),
@@ -1208,13 +1215,17 @@ namespace SnapEye.SolutionRegion
             bool isAI   = !source.HasValue;
             bool isUser = source == MessageSource.Microphone;
 
-            Color fill, edge;
+            Color fill, edge, textColor;
             string letter;
             HorizontalAlignment align;
 
-            if (isAI)        { fill = AIBubbleColor;     edge = AIBorderColor;     letter = "A"; align = HorizontalAlignment.Left;  }
-            else if (isUser) { fill = UserBubbleColor;   edge = UserBorderColor;   letter = "Y"; align = HorizontalAlignment.Right; }
-            else             { fill = SystemBubbleColor; edge = SystemBorderColor; letter = "O"; align = HorizontalAlignment.Left;  }
+            if (isAI)        { fill = AIBubbleColor;     edge = AIBorderColor;     textColor = BubbleTextColor; letter = "A"; align = HorizontalAlignment.Left;  }
+            else if (isUser) { fill = UserBubbleColor;   edge = UserBorderColor;   textColor = UserTextColor;   letter = "Y"; align = HorizontalAlignment.Right; }
+            else             { fill = SystemBubbleColor; edge = SystemBorderColor; textColor = SystemTextColor; letter = "O"; align = HorizontalAlignment.Left;  }
+
+            // The AI avatar gets the sky accent so it stays distinct from the other speaker's
+            // (similarly dark) avatar.
+            Color avatarEdge = isAI ? AnswerAccent : edge;
 
             var row = new Grid { Margin = new Thickness(0, 4, 0, 4) };
 
@@ -1230,7 +1241,7 @@ namespace SnapEye.SolutionRegion
                 Height = 26,
                 CornerRadius = new CornerRadius(13),
                 Background = new SolidColorBrush(fill),
-                BorderBrush = new SolidColorBrush(edge),
+                BorderBrush = new SolidColorBrush(avatarEdge),
                 BorderThickness = new Thickness(1),
                 VerticalAlignment = VerticalAlignment.Bottom,
                 Margin = isUser ? new Thickness(8, 0, 0, 0) : new Thickness(0, 0, 8, 0),
@@ -1259,7 +1270,7 @@ namespace SnapEye.SolutionRegion
             var textBlock = new TextBlock
             {
                 Text = text,
-                Foreground = new SolidColorBrush(BubbleTextColor),
+                Foreground = new SolidColorBrush(textColor),
                 FontSize = 13,
                 LineHeight = 18,
                 TextWrapping = TextWrapping.Wrap,

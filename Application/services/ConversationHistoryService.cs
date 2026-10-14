@@ -197,6 +197,62 @@ namespace SnapEye.Services
         }
 
         /// <summary>
+        /// The last <paramref name="maxTurns"/> user/assistant exchanges (typed questions,
+        /// quick actions and AI answers) as an alternating role sequence that starts with a
+        /// user turn and ends with an assistant turn, oldest first. Spoken transcript is
+        /// excluded - it is sent separately as transcript context.
+        /// </summary>
+        public IReadOnlyList<(string Role, string Content)> GetRecentDialogue(int maxTurns = 12, int maxCharsPerTurn = 1500)
+        {
+            var turns = new List<(string Role, string Content)>();
+            lock (sync)
+            {
+                foreach (var m in Current.Messages)
+                {
+                    string? role = m.Kind switch
+                    {
+                        ConversationMessageKind.UserTyped or ConversationMessageKind.QuickAction => "user",
+                        ConversationMessageKind.AssistantAnswer => "assistant",
+                        _ => null
+                    };
+                    string text = (m.Text ?? string.Empty).Trim();
+                    if (role == null || text.Length == 0) continue;
+                    if (text.Length > maxCharsPerTurn) text = text[..maxCharsPerTurn];
+
+                    if (turns.Count > 0 && turns[^1].Role == role)
+                        turns[^1] = (role, turns[^1].Content + "\n\n" + text);
+                    else
+                        turns.Add((role, text));
+                }
+            }
+
+            while (turns.Count > 0 && turns[^1].Role != "assistant") turns.RemoveAt(turns.Count - 1);
+            int keep = Math.Max(0, maxTurns) * 2;
+            if (turns.Count > keep) turns.RemoveRange(0, turns.Count - keep);
+            // Live auto-answers (triggered by the other party's speech) have no typed
+            // question before them. Keep them in memory by giving them a stand-in user turn
+            // instead of dropping them - the model needs the sequence to start with "user".
+            if (turns.Count > 0 && turns[0].Role != "user")
+                turns.Insert(0, ("user", "(Continuing from the live conversation - you suggested:)"));
+            return turns;
+        }
+
+        /// <summary>Text of the most recent AI answer in this conversation, or null.</summary>
+        public string? GetLastAssistantAnswer()
+        {
+            lock (sync)
+            {
+                for (int i = Current.Messages.Count - 1; i >= 0; i--)
+                {
+                    var m = Current.Messages[i];
+                    if (m.Kind == ConversationMessageKind.AssistantAnswer && !string.IsNullOrWhiteSpace(m.Text))
+                        return m.Text.Trim();
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
         /// Add or update a live spoken-transcript entry. Transcript events repeat the
         /// full utterance text as it refines, so events sharing a
         /// <paramref name="messageId"/> update the same entry in place; only a new id

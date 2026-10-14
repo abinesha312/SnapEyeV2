@@ -1138,7 +1138,12 @@ namespace SnapEye
             try
             {
                 if (sender is Button btn && btn.Tag is QuickActionConfig action)
-                    await RunContextualPromptAsync(action.Label, action.Prompt);
+                {
+                    if (action.Expand)
+                        await ExplainMoreAsync(action);
+                    else
+                        await RunContextualPromptAsync(action.Label, action.Prompt);
+                }
             }
             catch (Exception ex)
             {
@@ -1150,7 +1155,25 @@ namespace SnapEye
             }
         }
 
-        private async Task RunContextualPromptAsync(string displayLabel, string userPrompt)
+        /// <summary>
+        /// "Explain more": expands the most recent AI answer into a 1-2 minute read. The
+        /// previous answer is quoted in the prompt so the model expands exactly that text,
+        /// and the request is sent without the quick-action length cap.
+        /// </summary>
+        private async Task ExplainMoreAsync(QuickActionConfig action)
+        {
+            string? lastAnswer = history.GetLastAssistantAnswer();
+            if (string.IsNullOrWhiteSpace(lastAnswer))
+            {
+                ShowInlineError("Get an answer first, then tap Explain more.");
+                return;
+            }
+
+            string prompt = action.Prompt + "\n\nPREVIOUS ANSWER TO EXPAND:\n" + lastAnswer;
+            await RunContextualPromptAsync(action.Label, prompt, expand: true);
+        }
+
+        private async Task RunContextualPromptAsync(string displayLabel, string userPrompt, bool expand = false)
         {
             if (!await EnsureAuthTokenFreshAsync().ConfigureAwait(true))
                 return;
@@ -1189,7 +1212,10 @@ namespace SnapEye
                 jobDescription: "",
                 company: "",
                 role: "",
-                mode: GetCurrentModeId());
+                mode: GetCurrentModeId(),
+                history: history.GetRecentDialogue(),
+                quickAction: !expand,
+                expand: expand);
         }
 
         private void ExpandSessionIfCollapsed()
@@ -1393,7 +1419,7 @@ namespace SnapEye
             parts.AppendLine("---");
             parts.AppendLine("USER REQUEST: Based on the captured screen above and the previous conversation, explain or answer what would help the user right now. Be concise and practical.");
 
-            await streamingService.StreamResponseAsync(parts.ToString(), systemPrompt);
+            await streamingService.StreamResponseAsync(parts.ToString(), systemPrompt, history: history.GetRecentDialogue());
         }
 
         private void CopyAnswer_Click(object sender, RoutedEventArgs e)
@@ -1435,7 +1461,8 @@ namespace SnapEye
                 jobDescription: "",
                 company: "",
                 role: "",
-                mode: GetCurrentModeId());
+                mode: GetCurrentModeId(),
+                history: history.GetRecentDialogue());
         }
 
         private string GetCurrentModeId()

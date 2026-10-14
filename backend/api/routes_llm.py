@@ -71,6 +71,42 @@ class ContextLLMRequest(BaseModel):
     company: str = Field(default="", description="Target company (interview mode)")
     role: str = Field(default="", description="Target role (interview mode)")
     mode: str = Field(default="", description="Active assistant mode id")
+    history: List[dict] = Field(
+        default_factory=list,
+        description="Prior dialogue turns [{role: user|assistant, content}] oldest first",
+    )
+    quick_action: bool = Field(
+        default=False,
+        description="One-tap quick action (What should I say?, Recap, ...) - answer briefly",
+    )
+    expand: bool = Field(
+        default=False,
+        description="'Explain more' - expand the previous answer into a 1-2 minute read",
+    )
+
+
+def _normalize_history(history: List[dict]) -> List[LLMMessage]:
+    """
+    Turn client dialogue into a valid alternating user/assistant sequence that starts
+    with a user turn and ends with an assistant turn (the current question follows).
+    """
+    turns: List[LLMMessage] = []
+    for item in history or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "")).lower()
+        content = str(item.get("content", "") or "").strip()
+        if role not in ("user", "assistant") or not content:
+            continue
+        if turns and turns[-1].role == role:
+            turns[-1] = LLMMessage(role=role, content=f"{turns[-1].content}\n\n{content}")
+        else:
+            turns.append(LLMMessage(role=role, content=content))
+    while turns and turns[0].role != "user":
+        turns.pop(0)
+    while turns and turns[-1].role != "assistant":
+        turns.pop()
+    return turns
 
 
 class TestConnectionRequest(BaseModel):
@@ -155,13 +191,14 @@ async def context_stream_llm(
             import asyncio
             from services.rag_service import rag_service
             username = user_data.get("sub")
-            exp_task = rag_service.search_experience(request.question, top_k=3, username=username)
-            kb_task = rag_service.search(request.question, top_k=2, username=username)
-            mem_task = rag_service.search_user_memory(request.question, username=username or "", top_k=2)
-            experience_chunks, kb_chunks, memory_chunks = await asyncio.wait_for(
-                asyncio.gather(exp_task, kb_task, mem_task, return_exceptions=True),
-                timeout=0.6,
-            )
+            if rag_service.has_searchable_data(username):
+                exp_task = rag_service.search_experience(request.question, top_k=3, username=username)
+                kb_task = rag_service.search(request.question, top_k=2, username=username)
+                mem_task = rag_service.search_user_memory(request.question, username=username or "", top_k=2)
+                experience_chunks, kb_chunks, memory_chunks = await asyncio.wait_for(
+                    asyncio.gather(exp_task, kb_task, mem_task, return_exceptions=True),
+                    timeout=0.3,
+                )
             experience_chunks = experience_chunks if isinstance(experience_chunks, list) else []
             kb_chunks = kb_chunks if isinstance(kb_chunks, list) else []
             memory_chunks = memory_chunks if isinstance(memory_chunks, list) else []
@@ -180,7 +217,10 @@ async def context_stream_llm(
 
     # Always apply the grounding/human-answer rules, and strictly prepend the selected mode's
     # template (sent by the client as system_prompt) so the chosen mode governs every query.
-    system_prompt = _build_assistant_system_prompt(is_interview, mode_prompt=request.system_prompt)
+    system_prompt = _build_assistant_system_prompt(
+        is_interview, mode_prompt=request.system_prompt,
+        quick_action=request.quick_action, expand=request.expand,
+    )
 
     # Build the user message from all contexts
     user_content = _build_context_message(
@@ -197,12 +237,21 @@ async def context_stream_llm(
         is_interview=is_interview,
         experience_searched=request.use_profile,
     )
-    messages = [LLMMessage(role="user", content=user_content)]
+    if request.quick_action:
+        user_content += "\n\n" + _QUICK_ACTION_RULE
+    elif request.expand:
+        user_content += "\n\n" + _EXPAND_RULE
+    messages = _normalize_history(request.history) + [LLMMessage(role="user", content=user_content)]
 
     return StreamingResponse(
         _stream_tokens(
             messages,
             system_prompt,
+            max_tokens=(
+                settings.LLM_QUICK_ACTION_MAX_TOKENS if request.quick_action
+                else settings.LLM_EXPAND_MAX_TOKENS if request.expand
+                else settings.LLM_QUICK_MAX_TOKENS
+            ),
             provider=request.provider,
             api_key=request.api_key,
             model=request.model,
@@ -306,7 +355,26 @@ async def _stream_tokens(
         yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
 
 
-def _build_assistant_system_prompt(is_interview: bool = False, mode_prompt: str = "") -> str:
+_QUICK_ACTION_RULE = (
+    "QUICK ACTION: I tapped a one-click button mid-conversation and need something I can use "
+    "instantly. Lead with the answer - no preamble, and never remark on the transcript itself "
+    "(repetition, quality, loops); just give the best move for this moment. "
+    "HARD LIMIT: 70 words max, as 2-3 short sentences or at most 3 one-line bullets."
+)
+
+
+_EXPAND_RULE = (
+    "EXPLAIN MORE: expand the PREVIOUS ANSWER quoted in this message - do not answer a new "
+    "question. Keep its points and their order; turn each point into a short paragraph with "
+    "the reasoning behind it and one concrete example. Practical, not deeply technical. "
+    "Target 250-400 words - a 1-2 minute read - with **bold** lead-ins per point."
+)
+
+
+def _build_assistant_system_prompt(
+    is_interview: bool = False, mode_prompt: str = "", quick_action: bool = False,
+    expand: bool = False,
+) -> str:
     """Build the default system prompt: a human, first-person, story-driven assistant.
 
     When ``mode_prompt`` (the client's selected-mode template) is supplied it is strictly
@@ -323,20 +391,32 @@ def _build_assistant_system_prompt(is_interview: bool = False, mode_prompt: str 
         "added to the business or organization.\n"
         "RULES:\n"
         "- Answer the actual question directly first; stay strictly on-topic.\n"
+        "- Your first words ARE the answer, stated with confidence. Never open with filler "
+        "(\"Great question\", \"Sure\", \"Let me think\", \"Okay so\"), never think out loud or "
+        "narrate your reasoning, and never comment on the transcript itself.\n"
         "- Be concrete and practical — specific steps, tools, numbers — no filler or padding.\n"
         "- If the detected question is garbled or ambiguous, answer the most likely intent from "
         "the transcript instead of guessing wildly or asking for clarification.\n"
-        "- Ground every claim in the background/context provided; never invent facts. If something "
-        "isn't in my background or the context, say so briefly rather than fabricating.\n"
+        "- Never invent personal facts (employers, projects, numbers) that aren't in my background. "
+        "When my background doesn't cover the question, just answer it confidently from solid "
+        "expertise - no disclaimers about what my background does or doesn't contain.\n"
         "- Sound warm, natural, and confident — reflective, not a robotic bullet dump.\n"
-        "- Keep responses under ~220 words.\n"
-        "- Use light markdown (**bold**, short paragraphs). No large headings (## or #)."
+        + (
+            "- Keep responses under 70 words.\n" if quick_action
+            else "- Aim for 250-400 words (a 1-2 minute read).\n" if expand
+            else "- Keep responses under ~220 words.\n"
+        )
+        + "- Use light markdown (**bold**, short paragraphs). No large headings (## or #)."
     )
     if is_interview:
         base += (
             "\n\nINTERVIEW MODE: Follow the ACTIVE MODE instructions above. Present me as a "
             "strong, likeable candidate while staying truthful to my real experience."
         )
+    if quick_action:
+        base += "\n\n" + _QUICK_ACTION_RULE
+    elif expand:
+        base += "\n\n" + _EXPAND_RULE
     if mode_prompt and mode_prompt.strip():
         base = (
             "ACTIVE MODE (follow these instructions strictly):\n"
@@ -383,8 +463,8 @@ def _build_context_message(
     elif experience_searched and not experience_chunks:
         parts.append(
             "\n**Background note:** No experience entry matched this question closely. "
-            "Do NOT invent prior roles, projects, or employers — answer from general knowledge "
-            "or say briefly you don't have a matching example in your background."
+            "Do NOT invent prior roles, projects, or employers — answer confidently from general "
+            "expertise, without mentioning that no matching example exists."
         )
 
     if memory_chunks:

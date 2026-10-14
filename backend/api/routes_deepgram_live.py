@@ -29,7 +29,7 @@ router = APIRouter(
 @router.websocket("/live")
 async def live_transcribe(
     websocket: WebSocket,
-    token: str = Query(..., description="JWT authentication token"),
+    token: str = Query("", description="JWT authentication token (optional when AUTH_ENABLED=false)"),
     model: str = Query("nova-3"),
     language: str = Query(settings.DEEPGRAM_LANGUAGE),
     endpointing_ms: int = Query(300),

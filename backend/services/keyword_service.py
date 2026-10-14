@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 from config import settings
 
@@ -74,7 +74,9 @@ class KeywordDetector:
         self._command_regex = re.compile(
             "|".join(self.COMMAND_PATTERNS), re.IGNORECASE
         )
-        self._last_trigger_time: float = 0
+        # Debounce is tracked per audio source so the user speaking never suppresses a
+        # question from the other party (and vice versa).
+        self._last_trigger_time: Dict[str, float] = {}
         self._debounce_ms = settings.KEYWORD_DEBOUNCE_MS
 
         logger.info(
@@ -82,7 +84,7 @@ class KeywordDetector:
             f"question patterns: {len(self.QUESTION_PATTERNS)})"
         )
 
-    def detect(self, text: str, is_final: bool = True) -> DetectionResult:
+    def detect(self, text: str, is_final: bool = True, source: str = "default") -> DetectionResult:
         """
         Detect questions, keywords, and commands in transcript text.
 
@@ -104,7 +106,7 @@ class KeywordDetector:
 
         # Check debounce
         now = time.time() * 1000  # ms
-        if now - self._last_trigger_time < self._debounce_ms:
+        if now - self._last_trigger_time.get(source, 0) < self._debounce_ms:
             return result
 
         text_lower = text.lower().strip()
@@ -115,7 +117,7 @@ class KeywordDetector:
             result.triggered = True
             result.trigger_type = "command"
             result.confidence = 1.0
-            self._last_trigger_time = now
+            self._last_trigger_time[source] = now
             logger.info(f"Command detected: '{command_match.group()}'")
             return result
 
@@ -141,7 +143,7 @@ class KeywordDetector:
                 result.trigger_type = "question+keyword"
 
         if result.triggered:
-            self._last_trigger_time = now
+            self._last_trigger_time[source] = now
             logger.info(
                 f"Detection triggered: type={result.trigger_type}, "
                 f"questions={len(result.questions)}, "

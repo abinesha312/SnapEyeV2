@@ -151,6 +151,16 @@ class SecurityManager:
         Raises:
             HTTPException: If token is invalid or expired
         """
+        if not settings.AUTH_ENABLED:
+            # Auth disabled: honour a valid token if one is given, otherwise act as the
+            # default user - never reject.
+            try:
+                if token and token not in self._token_blacklist:
+                    return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+            except Exception:
+                pass
+            return self.anonymous_payload()
+
         try:
             # Check if token is blacklisted
             if token in self._token_blacklist:
@@ -177,6 +187,11 @@ class SecurityManager:
                 detail=f"Invalid token: {str(e)}"
             )
     
+    @staticmethod
+    def anonymous_payload() -> Dict:
+        """Token payload used for every request while AUTH_ENABLED is False."""
+        return {"sub": settings.AUTH_DEFAULT_USER, "type": "access", "auth_disabled": True}
+
     def revoke_token(self, token: str) -> None:
         """
         Revoke/blacklist a token
@@ -223,8 +238,9 @@ class SecurityManager:
         return self.hash_api_key(api_key) == stored_hash
 
 
-# Security scheme for FastAPI
-security_scheme = HTTPBearer()
+# Security scheme for FastAPI. auto_error=False so a missing Authorization header is
+# handled by verify_auth (allowed when AUTH_ENABLED is False, 401 otherwise).
+security_scheme = HTTPBearer(auto_error=False)
 
 
 class AuthHandler:
@@ -237,7 +253,7 @@ class AuthHandler:
     
     async def verify_auth(
         self,
-        credentials: HTTPAuthorizationCredentials = Depends(security_scheme)
+        credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme)
     ) -> Dict:
         """
         Dependency for verifying JWT tokens in protected endpoints
@@ -253,13 +269,15 @@ class AuthHandler:
             async def protected_route(user=Depends(auth_handler.verify_auth)):
                 return {"user": user}
         """
-        token = credentials.credentials
-        payload = self.security.verify_token(token)
-        return payload
+        if credentials is None:
+            if not settings.AUTH_ENABLED:
+                return self.security.anonymous_payload()
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        return self.security.verify_token(credentials.credentials)
     
     async def get_current_user(
         self,
-        credentials: HTTPAuthorizationCredentials = Depends(security_scheme)
+        credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme)
     ) -> str:
         """
         Get current user from token

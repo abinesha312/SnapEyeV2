@@ -573,6 +573,21 @@ class RAGService:
             logger.error(f"List experiences error: {e}")
             return []
 
+    def has_searchable_data(self, username: Optional[str] = None) -> bool:
+        """Cheap check so callers can skip retrieval entirely when every store is empty."""
+        try:
+            if self._load_experience_entries(username):
+                return True
+            self._ensure_initialized()
+            if not self._initialized:
+                return False
+            return any(
+                c is not None and c.count() > 0
+                for c in (self._collection, self._experience_collection, self._user_memory_collection)
+            )
+        except Exception:
+            return True
+
     async def search_experience(
         self, query: str, top_k: int = 4, username: Optional[str] = None
     ) -> List[RAGChunk]:
