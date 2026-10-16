@@ -220,8 +220,8 @@ namespace SnapEye.Services
             if (!string.IsNullOrEmpty(jobDescription) && jobDescription.Length > 8000)
                 jobDescription = jobDescription.Substring(0, 8000);
 
-            if (!string.IsNullOrEmpty(modeSystemPrompt) && modeSystemPrompt.Length > 4000)
-                modeSystemPrompt = modeSystemPrompt.Substring(0, 4000);
+            if (!string.IsNullOrEmpty(modeSystemPrompt) && modeSystemPrompt.Length > 20000)
+                modeSystemPrompt = modeSystemPrompt.Substring(0, 20000);
 
             var message = new
             {

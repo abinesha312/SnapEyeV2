@@ -35,11 +35,11 @@ audio:
   encoding: "linear16"
 
 openai:
-  model: "gpt-4o"
+  model: "gpt-6-luna"
   embedding_model: "text-embedding-3-small"
 
 anthropic:
-  model: "claude-haiku-4-5-20251001"
+  model: "claude-haiku-5-5"
 
 llm:
   primary_provider: "anthropic"

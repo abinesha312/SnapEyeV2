@@ -1,0 +1,2 @@
+# Focus Detect uses the Python standard library only (ctypes, http.server, json).
+# No pip packages required. Windows is required for WinEvent focus hooks.

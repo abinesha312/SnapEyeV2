@@ -46,7 +46,7 @@ namespace SnapEye.Models
                 ApiKeyPlaceholder = "sk-ant-...",
                 Models = new List<string>
                 {
-                    "claude-haiku-4-5-20251001",
+                    "claude-haiku-5-5",
                     "claude-sonnet-4.5",
                     "claude-opus-4.1",
                 },

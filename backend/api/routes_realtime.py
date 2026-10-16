@@ -303,7 +303,7 @@ async def audio_transcribe(
                                 company=command.get("company") or "",
                                 role=command.get("role") or "",
                                 mode=command.get("mode") or "",
-                                mode_system_prompt=(command.get("mode_system_prompt") or "")[:4000],
+                                mode_system_prompt=(command.get("mode_system_prompt") or "")[:20000],
                             )
                             await safe_send({
                                 "type": "interview_context.ack",

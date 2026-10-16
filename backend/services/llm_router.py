@@ -19,16 +19,92 @@ logger = logging.getLogger(__name__)
 class LLMMessage:
     """Standardized message format for LLM providers."""
 
-    def __init__(self, role: str, content: str):
+    def __init__(
+        self,
+        role: str,
+        content: str,
+        images: Optional[List[str]] = None,
+        parts: Optional[List[Dict[str, Any]]] = None,
+    ):
         self.role = role
         self.content = content
+        # Base64-encoded PNGs attached to this message (screen captures). Text-only
+        # messages keep the plain string content shape every provider already accepts.
+        self.images: List[str] = [i for i in (images or []) if i]
+        # Optional ordered multimodal parts: [{type:"text", text:"..."}, {type:"image", data:"base64"}].
+        # When set, providers emit content in this order (text1, image1, text2, image2, ...).
+        self.parts: List[Dict[str, Any]] = [
+            p for p in (parts or [])
+            if isinstance(p, dict) and p.get("type") in ("text", "image")
+        ]
 
     def to_openai(self) -> Dict:
-        return {"role": self.role, "content": self.content}
+        if self.parts:
+            oai_parts: List[Dict[str, Any]] = []
+            for p in self.parts:
+                if p.get("type") == "text":
+                    oai_parts.append({"type": "text", "text": str(p.get("text") or "")})
+                elif p.get("type") == "image" and p.get("data"):
+                    oai_parts.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{p['data']}",
+                            "detail": "high",
+                        },
+                    })
+            if oai_parts:
+                return {"role": self.role, "content": oai_parts}
+        if not self.images:
+            return {"role": self.role, "content": self.content}
+        parts: List[Dict[str, Any]] = [{"type": "text", "text": self.content}]
+        parts.extend(
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img}", "detail": "high"}}
+            for img in self.images
+        )
+        return {"role": self.role, "content": parts}
 
     def to_anthropic(self) -> Dict:
         role = "user" if self.role == "user" else "assistant"
-        return {"role": role, "content": self.content}
+        if self.parts:
+            ant_parts: List[Dict[str, Any]] = []
+            for p in self.parts:
+                if p.get("type") == "text":
+                    ant_parts.append({"type": "text", "text": str(p.get("text") or "")})
+                elif p.get("type") == "image" and p.get("data"):
+                    ant_parts.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": p["data"],
+                        },
+                    })
+            if ant_parts:
+                return {"role": role, "content": ant_parts}
+        if not self.images:
+            return {"role": role, "content": self.content}
+        parts: List[Dict[str, Any]] = [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img}}
+            for img in self.images
+        ]
+        parts.append({"type": "text", "text": self.content})
+        return {"role": role, "content": parts}
+
+    def to_gemini_parts(self) -> List[Dict[str, Any]]:
+        if self.parts:
+            gem_parts: List[Dict[str, Any]] = []
+            for p in self.parts:
+                if p.get("type") == "text":
+                    gem_parts.append({"text": str(p.get("text") or "")})
+                elif p.get("type") == "image" and p.get("data"):
+                    gem_parts.append({
+                        "inline_data": {"mime_type": "image/png", "data": p["data"]},
+                    })
+            if gem_parts:
+                return gem_parts
+        parts: List[Dict[str, Any]] = [{"text": self.content}]
+        parts.extend({"inline_data": {"mime_type": "image/png", "data": img}} for img in self.images)
+        return parts
 
 
 class BaseLLMProvider(ABC):
@@ -326,7 +402,7 @@ class GeminiProvider(BaseLLMProvider):
         out = []
         for m in messages:
             role = "user" if m.role == "user" else "model"
-            out.append({"role": role, "parts": [{"text": m.content}]})
+            out.append({"role": role, "parts": m.to_gemini_parts()})
         return out
 
     async def generate(

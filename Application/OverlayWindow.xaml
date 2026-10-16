@@ -9,6 +9,7 @@
         Topmost="True"
         ResizeMode="NoResize"
         ShowInTaskbar="False"
+        ShowActivated="False"
         Width="680"
         SizeToContent="Height"
         MouseDown="Window_MouseDown"
@@ -487,7 +488,7 @@
                 <ToggleButton x:Name="IslandBarToggle" Width="44" Height="44" Margin="8,0,0,0"
                               IsChecked="True" Cursor="Hand"
                               Checked="IslandBarToggle_Changed" Unchecked="IslandBarToggle_Changed"
-                              ToolTip="Island Bar — ON: SnapEye is clickable. OFF: clicks pass through to the app behind (this button stays clickable).">
+                              ToolTip="Island Bar — ON: SnapEye is clickable. OFF: clicks pass through to the app behind (this button stays clickable). Shortcut: Ctrl+Alt+Z">
                     <ToggleButton.Template>
                         <ControlTemplate TargetType="ToggleButton">
                             <Border x:Name="IslandBorder" Width="44" Height="44" CornerRadius="22"
@@ -532,10 +533,10 @@
                             <MenuItem Header="Copy answer" Click="CopyAnswer_Click" InputGestureText="Ctrl+Shift+C"/>
                             <MenuItem Header="Screenshot / OCR" Click="Screenshot_Click" InputGestureText="Ctrl+Shift+S"/>
                             <MenuItem Header="Hide / show overlay" Click="ToggleOverlayVisibility_Click" InputGestureText="Ctrl+Shift+H"/>
-                            <MenuItem Header="Expand Live Insights" Click="ExpandLiveInsights_MenuClick" InputGestureText="Ctrl+Shift+Up"/>
-                            <MenuItem Header="Collapse Live Insights" Click="CollapseLiveInsights_MenuClick" InputGestureText="Ctrl+Shift+Down"/>
+                            <MenuItem Header="Expand Live Insights" Click="ExpandLiveInsights_MenuClick" InputGestureText="Ctrl+Shift+Down"/>
+                            <MenuItem Header="Collapse Live Insights" Click="CollapseLiveInsights_MenuClick" InputGestureText="Ctrl+Shift+Up"/>
                             <Separator/>
-                            <MenuItem Header="Opacity">
+                            <MenuItem Header="Opacity" InputGestureText="Ctrl+Alt+> / &lt;">
                                 <Slider x:Name="OpacitySlider" Minimum="0.3" Maximum="1.0" Value="0.95" Width="120"
                                         ValueChanged="OpacitySlider_Changed"/>
                             </MenuItem>
@@ -578,7 +579,8 @@
 
         <StackPanel x:Name="SessionBody" Grid.Row="1" Margin="0,10,0,0">
             <Border x:Name="LiveInsightsCard" CornerRadius="18" ClipToBounds="True"
-                    BorderBrush="#52525B" BorderThickness="1">
+                    BorderBrush="#52525B" BorderThickness="1"
+                    PreviewMouseWheel="LiveInsightsCard_PreviewMouseWheel">
                 <Border.Background>
                     <SolidColorBrush Color="#E627272A"/>
                 </Border.Background>
@@ -588,7 +590,9 @@
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
-                        <RowDefinition x:Name="ContentRow" Height="420"/>
+                        <RowDefinition x:Name="ContentRow" Height="420" MinHeight="160"/>
+                        <RowDefinition Height="8"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
@@ -648,7 +652,17 @@
 
                     <solution:SolutionRegionAlpha x:Name="AlphaRegion" Grid.Row="1"/>
 
-                    <Border Grid.Row="2" Padding="10,6,10,6">
+                    <!-- Drag grip to resize the Live Insights content (bottom) area. -->
+                    <Border x:Name="ContentResizeGrip" Grid.Row="2" Background="#3325252B" Cursor="SizeNS"
+                            ToolTip="Drag to resize the answer area"
+                            MouseLeftButtonDown="ContentResizeGrip_MouseLeftButtonDown"
+                            MouseMove="ContentResizeGrip_MouseMove"
+                            MouseLeftButtonUp="ContentResizeGrip_MouseLeftButtonUp">
+                        <Rectangle Width="36" Height="3" RadiusX="1.5" RadiusY="1.5"
+                                   Fill="#66A1A1AA" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+
+                    <Border Grid.Row="3" Padding="10,6,10,6">
                         <Border.BorderBrush><SolidColorBrush Color="#3F3F46"/></Border.BorderBrush>
                         <Border.BorderThickness><Thickness>0,1,0,1</Thickness></Border.BorderThickness>
                         <Grid>
@@ -724,6 +738,43 @@
                                         </ControlTemplate>
                                     </Button.Template>
                                 </Button>
+                                <!-- Play (unchecked) = send each capture immediately.
+                                     Pause (checked) = buffer screenshots until Play again. -->
+                                <ToggleButton x:Name="CaptureBatchToggle" Width="30" Height="30" Margin="6,0,0,0"
+                                              Checked="CaptureBatchToggle_Changed" Unchecked="CaptureBatchToggle_Changed"
+                                              ToolTip="Play: send each capture immediately. Pause: collect screenshots, then Play to OCR+send all. Shortcut: Ctrl+Shift+P"
+                                              Cursor="Hand" VerticalAlignment="Center">
+                                    <ToggleButton.Template>
+                                        <ControlTemplate TargetType="ToggleButton">
+                                            <Border x:Name="BatchBorder" Width="30" Height="30" CornerRadius="15"
+                                                    Background="#332563EB" BorderBrush="#2563EB" BorderThickness="1">
+                                                <Grid>
+                                                    <Viewbox x:Name="PlayIcon" Width="14" Height="14">
+                                                        <Canvas Width="24" Height="24">
+                                                            <Path Fill="#93C5FD" Data="M8,5.14V19.14L19,12.14L8,5.14Z"/>
+                                                        </Canvas>
+                                                    </Viewbox>
+                                                    <Viewbox x:Name="PauseIcon" Width="14" Height="14" Visibility="Collapsed">
+                                                        <Canvas Width="24" Height="24">
+                                                            <Path Fill="#FCD34D" Data="M14,19H18V5H14M6,19H10V5H6V19Z"/>
+                                                        </Canvas>
+                                                    </Viewbox>
+                                                </Grid>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter TargetName="BatchBorder" Property="Background" Value="#4D2563EB"/>
+                                                </Trigger>
+                                                <Trigger Property="IsChecked" Value="True">
+                                                    <Setter TargetName="BatchBorder" Property="Background" Value="#33CA8A04"/>
+                                                    <Setter TargetName="BatchBorder" Property="BorderBrush" Value="#CA8A04"/>
+                                                    <Setter TargetName="PlayIcon" Property="Visibility" Value="Collapsed"/>
+                                                    <Setter TargetName="PauseIcon" Property="Visibility" Value="Visible"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </ToggleButton.Template>
+                                </ToggleButton>
                                 <ToggleButton x:Name="MicMuteBtn" Width="30" Height="30" Margin="6,0,0,0"
                                               Checked="MicMuteBtn_Changed" Unchecked="MicMuteBtn_Changed"
                                               ToolTip="Mute microphone (` + Space)"
@@ -763,7 +814,18 @@
                         </Grid>
                     </Border>
 
-                    <Border Grid.Row="3" Padding="14,10,14,14" Background="#1AFFFFFF">
+                    <!-- Pending multi-capture thumbnails (visible while Pause mode has buffered screenshots). -->
+                    <Border x:Name="PendingCapturesHost" Grid.Row="4" Padding="12,8,12,0" Background="#1AFFFFFF"
+                            Visibility="Collapsed">
+                        <ScrollViewer x:Name="PendingCapturesScroll"
+                                      HorizontalScrollBarVisibility="Auto"
+                                      VerticalScrollBarVisibility="Disabled"
+                                      Height="72">
+                            <StackPanel x:Name="PendingCapturesPanel" Orientation="Horizontal"/>
+                        </ScrollViewer>
+                    </Border>
+
+                    <Border Grid.Row="5" Padding="14,10,14,14" Background="#1AFFFFFF">
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>

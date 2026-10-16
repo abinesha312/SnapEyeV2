@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -7,6 +10,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using SnapEye.Services;
@@ -49,9 +53,21 @@ namespace SnapEye
         // Toggled by MicMuteBtn or the global Backtick+Space hook.
         private bool micMuted;
         private LowLevelKeyboardHook? micMuteHook;
+        private WheelCaptureHook? wheelHook;
 
-        /// <summary>Pixels per press for Ctrl+Alt+Arrow overlay nudge (RegisterHotKey only; no LL hook).</summary>
+        /// <summary>Pixels per press/repeat for Ctrl+Alt+Arrow overlay nudge (RegisterHotKey only; no LL hook).</summary>
         private const int OverlayNudgeStepPx = 28;
+
+        /// <summary>Min/max height for the Live Insights content area when drag-resizing.</summary>
+        private const double ContentAreaMinHeight = 160;
+        private const double ContentAreaMaxHeight = 900;
+
+        private bool resizingContentArea;
+        private Point contentResizeStart;
+        private double contentResizeStartHeight;
+
+        /// <summary>Opacity step for Ctrl+Alt+> / Ctrl+Alt+&lt;.</summary>
+        private const double OpacityStep = 0.05;
 
         // State
         private OverlaySessionPhase sessionPhase = OverlaySessionPhase.Ready;
@@ -100,7 +116,28 @@ namespace SnapEye
         // (which would cancel each other's LLM streams and leave the UI confused).
         private int captureInFlight;
 
+        /// <summary>Max screenshots buffered in Pause (batch) mode before we refuse more.</summary>
+        private const int MaxPendingCaptures = 8;
+
+        private sealed class PendingCapture
+        {
+            public required string Base64 { get; init; }
+            public string? SavedPath { get; init; }
+            public ImageSource? Thumbnail { get; init; }
+        }
+
+        private readonly List<PendingCapture> pendingCaptures = new();
+
+        /// <summary>
+        /// Set when the user clicks Play (leaves Pause) while a camera capture is still
+        /// in flight. The capture's finally-block starts extraction as soon as it finishes
+        /// so unpausing never silently drops the batch.
+        /// </summary>
+        private bool finalizeBatchWhenIdle;
+
         private bool IsListening => sessionPhase == OverlaySessionPhase.Listening;
+
+        private bool IsBatchCaptureMode => CaptureBatchToggle?.IsChecked == true;
 
         public OverlayWindow()
         {
@@ -166,6 +203,8 @@ namespace SnapEye
         protected override void OnSourceInitialized(EventArgs e)
         {
             base.OnSourceInitialized(e);
+            // Clicks must not make this overlay the foreground window.
+            NoActivateWindow.Apply(this);
             // Layered WPF windows: apply as soon as HWND exists; Loaded will set flags again.
             if (AppConfig.InvisibleToCapture)
                 CaptureInvisibility.ApplyToWindow(this);
@@ -289,6 +328,11 @@ namespace SnapEye
             // the rest of the overlay passes clicks through to the app behind it.
             clickThroughService = new ClickThroughService(this, GetIslandBarScreenRect);
 
+            // Scroll Live Insights from a global wheel hook whenever the cursor is over the
+            // card (click-through or normal). Nested Markdown/code viewers otherwise swallow
+            // the wheel so chrome / “outside the answer text” never scrolls the conversation.
+            wheelHook = new WheelCaptureHook(HandleLiveInsightsWheel);
+
             // Register the system-wide hotkeys so SnapEye reacts to Ctrl+Shift+L/S/C/H
             // even when another application has focus. Window_Loaded fires after the
             // HWND exists, which is what GlobalHotkeyService needs.
@@ -307,6 +351,7 @@ namespace SnapEye
             {
                 Console.WriteLine($"[Hotkey] Mic mute hook error: {ex.Message}");
             }
+
         }
 
         /// <summary>Screen-pixel rectangle of the Island Bar button (the click-through carve-out).</summary>
@@ -326,6 +371,99 @@ namespace SnapEye
             {
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Global wheel handler for Live Insights. Vertical wheel scrolls the conversation;
+        /// horizontal wheel (trackpad sideways) or Shift+vertical wheel pans a wide code block
+        /// under the cursor. Returns true to swallow the OS event.
+        /// </summary>
+        private bool HandleLiveInsightsWheel(int screenX, int screenY, int delta, bool horizontal)
+        {
+            if (!isExpanded || !IsVisible || AlphaRegion == null) return false;
+            if (LiveInsightsCard == null || !LiveInsightsCard.IsVisible) return false;
+            if (LiveInsightsCard.ActualWidth <= 0 || LiveInsightsCard.ActualHeight <= 0) return false;
+
+            Point tl = LiveInsightsCard.PointToScreen(new Point(0, 0));
+            Point br = LiveInsightsCard.PointToScreen(
+                new Point(LiveInsightsCard.ActualWidth, LiveInsightsCard.ActualHeight));
+            if (!new Rect(tl, br).Contains(screenX, screenY)) return false;
+
+            bool shift = (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift;
+            if (horizontal || shift)
+            {
+                // Trackpad H-swipe or Shift+wheel → pan code under the cursor when it overflows.
+                if (AlphaRegion.TryScrollCodeBlockAt(screenX, screenY, delta))
+                    return true;
+                // Horizontal gesture outside a scrollable code block: swallow so the app
+                // behind the overlay does not pan; Shift+wheel with nowhere to pan falls
+                // through to vertical conversation scroll below when shift is held alone.
+                if (horizontal)
+                    return true;
+            }
+
+            // Leave multiline TextBoxes / combo dropdowns / pending-capture strip alone.
+            if (IsScreenPointOverPrivateScroller(screenX, screenY))
+                return false;
+
+            AlphaRegion.ScrollActiveView(delta);
+            return true;
+        }
+
+        /// <summary>
+        /// True when the cursor is over a control that should keep its own wheel behavior
+        /// (job-details / chat input, combo popup, horizontal pending-capture strip).
+        /// </summary>
+        private bool IsScreenPointOverPrivateScroller(int screenX, int screenY)
+        {
+            try
+            {
+                if (LiveInsightsCard == null) return false;
+                Point local = LiveInsightsCard.PointFromScreen(new Point(screenX, screenY));
+                var hit = VisualTreeHelper.HitTest(LiveInsightsCard, local);
+                for (DependencyObject? d = hit?.VisualHit;
+                     d != null && !ReferenceEquals(d, LiveInsightsCard);
+                     d = VisualTreeHelper.GetParent(d))
+                {
+                    if (d is TextBox or ComboBox)
+                        return true;
+                    if (ReferenceEquals(d, PendingCapturesScroll))
+                        return true;
+                }
+            }
+            catch
+            {
+                /* best effort */
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Fallback when the global wheel hook does not run (e.g. hook install failed).
+        /// Always forwards to the response view; Shift+code horizontal pan is handled by
+        /// <see cref="SolutionRegion.SolutionRegionAlpha"/>'s own PreviewMouseWheel.
+        /// </summary>
+        private void LiveInsightsCard_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+        {
+            if (e.Handled || e.Delta == 0 || AlphaRegion == null) return;
+
+            if ((Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift)
+                return;
+
+            if (e.OriginalSource is DependencyObject src)
+            {
+                for (DependencyObject? d = src; d != null && !ReferenceEquals(d, LiveInsightsCard);
+                     d = VisualTreeHelper.GetParent(d))
+                {
+                    if (d is TextBox or ComboBox)
+                        return;
+                    if (ReferenceEquals(d, PendingCapturesScroll))
+                        return;
+                }
+            }
+
+            AlphaRegion.ScrollActiveView(e.Delta);
+            e.Handled = true;
         }
 
         private void IslandBarToggle_Changed(object sender, RoutedEventArgs e)
@@ -433,6 +571,11 @@ namespace SnapEye
             try { CaptureInvisibility.HookAllPopups(this); } catch { /* best effort */ }
             try { CaptureInvisibility.HookContextMenu(SettingsMenu); } catch { /* best effort */ }
             try { CaptureInvisibility.HookComboBoxPopup(ModeSelector); } catch { /* best effort */ }
+
+            // Menus and dropdowns are separate top-level HWNDs; keep them from stealing focus too.
+            try { NoActivateWindow.HookAllPopups(this); } catch { /* best effort */ }
+            try { NoActivateWindow.HookContextMenu(SettingsMenu); } catch { /* best effort */ }
+            try { NoActivateWindow.HookComboBoxPopup(ModeSelector); } catch { /* best effort */ }
         }
 
         private void RegisterGlobalHotkeys()
@@ -455,6 +598,12 @@ namespace SnapEye
                 {
                     try { await CaptureScreenAndRouteAsync(); } catch (Exception ex) { Console.WriteLine($"[Hotkey] S error: {ex.Message}"); }
                 });
+                // Ctrl+Shift+P: Toggle Pause/Play multi-screenshot batch mode
+                hotkeyService.Register(ctrlShift, Key.P, () =>
+                {
+                    try { ToggleCaptureBatchMode(); }
+                    catch (Exception ex) { Console.WriteLine($"[Hotkey] P error: {ex.Message}"); }
+                });
                 // Ctrl+Shift+C: Copy current AI answer
                 hotkeyService.Register(ctrlShift, Key.C, () =>
                 {
@@ -471,47 +620,77 @@ namespace SnapEye
                     }
                     catch (Exception ex) { Console.WriteLine($"[Hotkey] H error: {ex.Message}"); }
                 });
-                // Ctrl+Shift+Up / Down: expand or collapse Live Insights panel
-                hotkeyService.Register(ctrlShift, Key.Up, () =>
+                // Ctrl+Shift+Down / Up: expand or collapse Live Insights panel
+                hotkeyService.Register(ctrlShift, Key.Down, () =>
                 {
                     try { SetLiveInsightsExpanded(true); }
                     catch (Exception ex) { Console.WriteLine($"[Hotkey] Expand error: {ex.Message}"); }
                 });
-                hotkeyService.Register(ctrlShift, Key.Down, () =>
+                hotkeyService.Register(ctrlShift, Key.Up, () =>
                 {
                     try { SetLiveInsightsExpanded(false); }
                     catch (Exception ex) { Console.WriteLine($"[Hotkey] Collapse error: {ex.Message}"); }
                 });
 
-                // Ctrl+Alt+Arrow: nudge overlay (RegisterHotKey only — one key + modifiers per combo).
+                // Ctrl+Alt+Arrow: nudge overlay. allowRepeat so holding the key keeps moving
+                // (MOD_NOREPEAT would fire once and stop).
                 uint ctrlAlt = GlobalHotkeyService.MOD_CONTROL | GlobalHotkeyService.MOD_ALT;
                 int step = OverlayNudgeStepPx;
                 hotkeyService.Register(ctrlAlt, Key.Left, () =>
                 {
                     try { NudgeOverlay(-step, 0); }
                     catch (Exception ex) { Console.WriteLine($"[Hotkey] Nudge left error: {ex.Message}"); }
-                });
+                }, allowRepeat: true);
                 hotkeyService.Register(ctrlAlt, Key.Right, () =>
                 {
                     try { NudgeOverlay(step, 0); }
                     catch (Exception ex) { Console.WriteLine($"[Hotkey] Nudge right error: {ex.Message}"); }
-                });
+                }, allowRepeat: true);
                 hotkeyService.Register(ctrlAlt, Key.Up, () =>
                 {
                     try { NudgeOverlay(0, -step); }
                     catch (Exception ex) { Console.WriteLine($"[Hotkey] Nudge up error: {ex.Message}"); }
-                });
+                }, allowRepeat: true);
                 hotkeyService.Register(ctrlAlt, Key.Down, () =>
                 {
                     try { NudgeOverlay(0, step); }
                     catch (Exception ex) { Console.WriteLine($"[Hotkey] Nudge down error: {ex.Message}"); }
+                }, allowRepeat: true);
+                // Ctrl+Alt+Z: Toggle Island Bar clickable ON/OFF
+                hotkeyService.Register(ctrlAlt, Key.Z, () =>
+                {
+                    try { ToggleIslandBarClickable(); }
+                    catch (Exception ex) { Console.WriteLine($"[Hotkey] Island Bar error: {ex.Message}"); }
                 });
+
+                // Ctrl+Alt+./> and Ctrl+Alt+,/< : opacity up / down (period & comma keys;
+                // Shift not required). allowRepeat so holding the chord keeps stepping.
+                hotkeyService.Register(ctrlAlt, Key.OemPeriod, () =>
+                {
+                    try { AdjustOpacity(OpacityStep); }
+                    catch (Exception ex) { Console.WriteLine($"[Hotkey] Opacity up error: {ex.Message}"); }
+                }, allowRepeat: true);
+                hotkeyService.Register(ctrlAlt, Key.OemComma, () =>
+                {
+                    try { AdjustOpacity(-OpacityStep); }
+                    catch (Exception ex) { Console.WriteLine($"[Hotkey] Opacity down error: {ex.Message}"); }
+                }, allowRepeat: true);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[Hotkey] Registration error: {ex.Message}");
                 ShowInlineError($"Could not register global hotkeys: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Flip Island Bar clickable mode (ON = interactive, OFF = click-through).
+        /// Driven by Ctrl+Alt+Z or the Island Bar toggle button.
+        /// </summary>
+        private void ToggleIslandBarClickable()
+        {
+            if (IslandBarToggle == null) return;
+            IslandBarToggle.IsChecked = IslandBarToggle.IsChecked != true;
         }
 
         private void InitializeWindowPosition()
@@ -552,6 +731,58 @@ namespace SnapEye
             catch (Exception ex)
             {
                 Console.WriteLine($"[UI] NudgeOverlay error: {ex.Message}");
+            }
+        }
+
+        private void ContentResizeGrip_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            try
+            {
+                if (ContentRow == null || sender is not UIElement grip) return;
+                resizingContentArea = true;
+                contentResizeStart = e.GetPosition(this);
+                contentResizeStartHeight = ContentRow.Height.IsAbsolute
+                    ? ContentRow.Height.Value
+                    : (AlphaRegion?.ActualHeight > 0 ? AlphaRegion.ActualHeight : 420);
+                grip.CaptureMouse();
+                e.Handled = true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] Content resize start error: {ex.Message}");
+            }
+        }
+
+        private void ContentResizeGrip_MouseMove(object sender, MouseEventArgs e)
+        {
+            if (!resizingContentArea || ContentRow == null) return;
+            try
+            {
+                Point p = e.GetPosition(this);
+                double dy = p.Y - contentResizeStart.Y;
+                double h = Math.Clamp(contentResizeStartHeight + dy, ContentAreaMinHeight, ContentAreaMaxHeight);
+                ContentRow.Height = new GridLength(h);
+                e.Handled = true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] Content resize move error: {ex.Message}");
+            }
+        }
+
+        private void ContentResizeGrip_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            if (!resizingContentArea) return;
+            try
+            {
+                resizingContentArea = false;
+                if (sender is UIElement grip && grip.IsMouseCaptured)
+                    grip.ReleaseMouseCapture();
+                e.Handled = true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] Content resize end error: {ex.Message}");
             }
         }
 
@@ -753,7 +984,12 @@ namespace SnapEye
         {
             if (e.ChangedButton == MouseButton.Left)
             {
-                try { DragMove(); } catch { /* drag already in progress */ }
+                try
+                {
+                    NoActivateWindow.BeginDrag(this);
+                    e.Handled = true;
+                }
+                catch { /* drag already in progress */ }
             }
         }
 
@@ -811,7 +1047,7 @@ namespace SnapEye
         {
             if (e.ChangedButton == MouseButton.Left)
             {
-                try { this.DragMove(); } catch { }
+                try { NoActivateWindow.BeginDrag(this); } catch { }
             }
         }
 
@@ -847,13 +1083,13 @@ namespace SnapEye
                     this.Visibility = this.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
                     e.Handled = true;
                 }
-                // Ctrl+Shift+Up / Down: Live Insights expand / collapse (global hotkey fallback)
-                else if (e.Key == Key.Up && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
+                // Ctrl+Shift+Down / Up: Live Insights expand / collapse (global hotkey fallback)
+                else if (e.Key == Key.Down && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
                 {
                     SetLiveInsightsExpanded(true);
                     e.Handled = true;
                 }
-                else if (e.Key == Key.Down && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
+                else if (e.Key == Key.Up && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
                 {
                     SetLiveInsightsExpanded(false);
                     e.Handled = true;
@@ -998,6 +1234,29 @@ namespace SnapEye
         private void OpacitySlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
             this.Opacity = e.NewValue;
+        }
+
+        /// <summary>
+        /// Step overlay opacity by <paramref name="delta"/>, clamped to
+        /// <see cref="AppConfig.MinOpacity"/>..<see cref="AppConfig.MaxOpacity"/>,
+        /// and keep the menu slider in sync.
+        /// </summary>
+        private void AdjustOpacity(double delta)
+        {
+            try
+            {
+                double next = Math.Clamp(
+                    this.Opacity + delta,
+                    AppConfig.MinOpacity,
+                    AppConfig.MaxOpacity);
+                this.Opacity = next;
+                if (OpacitySlider != null)
+                    OpacitySlider.Value = next;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Opacity] Adjust error: {ex.Message}");
+            }
         }
 
         private void Quit_Click(object sender, RoutedEventArgs e)
@@ -1331,10 +1590,8 @@ namespace SnapEye
         }
 
         /// <summary>
-        /// Captures the screen, extracts text via OCR, and displays ONLY the extracted text
-        /// inside the currently-active view (Chat or Transcript), then streams an AI answer
-        /// to the same view using the OCR + conversation history as context. No image is shown.
-        /// The OCR text is also stored in <see cref="lastScreenOcr"/> for live transcription context.
+        /// Captures the screen. In Play mode: OCR + stream immediately.
+        /// In Pause (batch) mode: buffer the PNG only until the user clicks Play.
         /// </summary>
         private async Task CaptureScreenAndRouteAsync()
         {
@@ -1357,10 +1614,21 @@ namespace SnapEye
                 // Transcript toggle is ON, so in practice this routes to the Chat view.
                 bool inTranscript = TranscriptToggle.IsChecked == true;
 
-                string? ocrText = await screenCaptureService.CaptureAndOcrAsync();
+                if (IsBatchCaptureMode)
+                {
+                    await BufferCaptureForBatchAsync().ConfigureAwait(true);
+                    return;
+                }
+
+                // Capture the monitor SnapEye is currently on (not always the primary),
+                // and persist the PNG under %AppData%\SnapEye\captures.
+                string? ocrText = await screenCaptureService.CaptureAndOcrAsync(this);
                 string displayText = string.IsNullOrWhiteSpace(ocrText)
                     ? "(No text could be extracted from the current screen.)"
                     : ocrText!;
+
+                if (!string.IsNullOrEmpty(screenCaptureService.LastSavedCapturePath))
+                    Console.WriteLine($"[Screen] Local capture: {screenCaptureService.LastSavedCapturePath}");
 
                 if (inTranscript)
                     AlphaRegion.AddScreenCaptureToTranscript(displayText);
@@ -1372,11 +1640,12 @@ namespace SnapEye
                     lastScreenOcr = ocrText;
                     if (IsListening && transcriptionService.IsConnected)
                         await transcriptionService.SendScreenContextAsync(ocrText);
-
-                    // Also ask the LLM to respond to what was captured, streaming the answer
-                    // into the same view the user is looking at.
-                    await StreamAnswerForScreenCaptureAsync(ocrText!, inTranscript);
                 }
+
+                // The model reads the screenshot itself, so answer even when OCR found nothing.
+                string? imageBase64 = screenCaptureService.LastCaptureBase64;
+                if (!string.IsNullOrWhiteSpace(ocrText) || !string.IsNullOrEmpty(imageBase64))
+                    await StreamAnswerForScreenCaptureAsync(ocrText ?? "", imageBase64, inTranscript);
             }
             catch (Exception ex)
             {
@@ -1387,10 +1656,172 @@ namespace SnapEye
             {
                 if (cameraBtn != null) cameraBtn.IsEnabled = true;
                 Interlocked.Exchange(ref captureInFlight, 0);
+                // User clicked Play while this capture was still running — start OCR now.
+                TryStartPendingBatchFinalize();
             }
         }
 
-        private async Task StreamAnswerForScreenCaptureAsync(string ocrText, bool inTranscript)
+        private async Task BufferCaptureForBatchAsync()
+        {
+            if (pendingCaptures.Count >= MaxPendingCaptures)
+            {
+                ShowInlineError($"Batch full ({MaxPendingCaptures}). Click Play to send, or remove a thumbnail.");
+                return;
+            }
+
+            string? base64 = await screenCaptureService.CaptureActiveWindowAsync(this).ConfigureAwait(true);
+            if (string.IsNullOrEmpty(base64))
+            {
+                ShowInlineError("Capture failed — nothing was added to the batch.");
+                return;
+            }
+
+            pendingCaptures.Add(new PendingCapture
+            {
+                Base64 = base64,
+                SavedPath = screenCaptureService.LastSavedCapturePath,
+                Thumbnail = TryCreateThumbnail(base64),
+            });
+            Console.WriteLine($"[Screen] Batched capture {pendingCaptures.Count}/{MaxPendingCaptures}: {screenCaptureService.LastSavedCapturePath}");
+            RefreshPendingCapturesUi();
+            ClearInlineError();
+        }
+
+        /// <summary>
+        /// Flip Pause/Play capture mode (same as the toolbar toggle / Ctrl+Shift+P).
+        /// Pausing buffers camera shots; unpausing starts concurrent OCR + send.
+        /// </summary>
+        private void ToggleCaptureBatchMode()
+        {
+            if (CaptureBatchToggle == null) return;
+            CaptureBatchToggle.IsChecked = CaptureBatchToggle.IsChecked != true;
+        }
+
+        private void CaptureBatchToggle_Changed(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (IsBatchCaptureMode)
+                {
+                    // Entered Pause / collect mode.
+                    finalizeBatchWhenIdle = false;
+                    RefreshPendingCapturesUi();
+                    ShowInlineError("Capture paused — camera buffers screenshots. Ctrl+Shift+P or Play to extract.");
+                    return;
+                }
+
+                // Left Pause → Play: start extraction immediately on any buffered screenshots.
+                if (pendingCaptures.Count > 0)
+                    StartBatchExtractionNow();
+                else
+                {
+                    RefreshPendingCapturesUi();
+                    ClearInlineError();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Screen] Batch toggle error: {ex.Message}");
+                ShowInlineError($"Batch mode error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Kick off concurrent OCR + LLM as soon as the user leaves Pause (Play).
+        /// If a camera capture is still in flight, queue finalize for when it finishes.
+        /// </summary>
+        private void StartBatchExtractionNow()
+        {
+            if (pendingCaptures.Count == 0) return;
+
+            ShowInlineError($"Extracting text from {pendingCaptures.Count} screen{(pendingCaptures.Count == 1 ? "" : "s")}…");
+
+            if (Volatile.Read(ref captureInFlight) == 1)
+            {
+                finalizeBatchWhenIdle = true;
+                return;
+            }
+
+            finalizeBatchWhenIdle = false;
+            _ = FinalizeBatchCaptureAsync();
+        }
+
+        private void TryStartPendingBatchFinalize()
+        {
+            if (!finalizeBatchWhenIdle) return;
+            if (IsBatchCaptureMode) { finalizeBatchWhenIdle = false; return; }
+            if (pendingCaptures.Count == 0) { finalizeBatchWhenIdle = false; return; }
+            if (Volatile.Read(ref captureInFlight) == 1) return;
+
+            finalizeBatchWhenIdle = false;
+            ShowInlineError($"Extracting text from {pendingCaptures.Count} screen{(pendingCaptures.Count == 1 ? "" : "s")}…");
+            _ = FinalizeBatchCaptureAsync();
+        }
+
+        private async Task FinalizeBatchCaptureAsync()
+        {
+            if (pendingCaptures.Count == 0) return;
+            if (Interlocked.Exchange(ref captureInFlight, 1) == 1)
+            {
+                // Another capture/finalize owns the lock — retry when it releases.
+                finalizeBatchWhenIdle = true;
+                return;
+            }
+
+            var cameraBtn = CameraBtn;
+            if (cameraBtn != null) cameraBtn.IsEnabled = false;
+            if (CaptureBatchToggle != null) CaptureBatchToggle.IsEnabled = false;
+
+            var batch = pendingCaptures.ToList();
+            try
+            {
+                ExpandSessionIfCollapsed();
+                ShowInlineError($"Extracting text from {batch.Count} screen{(batch.Count == 1 ? "" : "s")}…");
+
+                string?[] ocrTexts = await Task.WhenAll(
+                    batch.Select(p => screenCaptureService.SendToOcrAsync(p.Base64))).ConfigureAwait(true);
+
+                bool inTranscript = TranscriptToggle.IsChecked == true;
+                var displayParts = new List<string>();
+                for (int i = 0; i < batch.Count; i++)
+                {
+                    string ocr = string.IsNullOrWhiteSpace(ocrTexts[i])
+                        ? "(OCR found no text)"
+                        : ocrTexts[i]!;
+                    displayParts.Add($"Screen {i + 1}:\n{ocr}");
+                }
+
+                string combinedDisplay = string.Join("\n\n---\n\n", displayParts);
+                if (inTranscript)
+                    AlphaRegion.AddScreenCaptureToTranscript(combinedDisplay);
+                else
+                    AlphaRegion.AddScreenCaptureToChat(combinedDisplay);
+
+                lastScreenOcr = string.Join("\n\n", ocrTexts.Where(t => !string.IsNullOrWhiteSpace(t)));
+                if (!string.IsNullOrWhiteSpace(lastScreenOcr) && IsListening && transcriptionService.IsConnected)
+                    await transcriptionService.SendScreenContextAsync(lastScreenOcr);
+
+                ClearInlineError();
+                pendingCaptures.Clear();
+                RefreshPendingCapturesUi();
+
+                await StreamAnswerForScreenCaptureBatchAsync(batch, ocrTexts, inTranscript).ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Screen] Batch finalize error: {ex.Message}");
+                ShowInlineError($"Batch send error: {ex.Message}");
+            }
+            finally
+            {
+                if (cameraBtn != null) cameraBtn.IsEnabled = true;
+                if (CaptureBatchToggle != null) CaptureBatchToggle.IsEnabled = true;
+                Interlocked.Exchange(ref captureInFlight, 0);
+                TryStartPendingBatchFinalize();
+            }
+        }
+
+        private async Task StreamAnswerForScreenCaptureAsync(string ocrText, string? imageBase64, bool inTranscript)
         {
             if (!await EnsureAuthTokenFreshAsync().ConfigureAwait(true))
                 return;
@@ -1413,13 +1844,177 @@ namespace SnapEye
             var parts = new StringBuilder();
             if (!string.IsNullOrEmpty(context))
                 parts.AppendLine(context);
-            parts.AppendLine("SCREEN CAPTURE (OCR):");
+            bool hasImage = !string.IsNullOrEmpty(imageBase64);
+            parts.AppendLine(hasImage ? "SCREEN CAPTURE (OCR, rough backup only):" : "SCREEN CAPTURE (OCR):");
             parts.AppendLine("---");
-            parts.AppendLine(ocrText);
+            parts.AppendLine(string.IsNullOrWhiteSpace(ocrText) ? "(OCR found no text)" : ocrText);
             parts.AppendLine("---");
-            parts.AppendLine("USER REQUEST: Based on the captured screen above and the previous conversation, explain or answer what would help the user right now. Be concise and practical.");
+            parts.AppendLine(hasImage
+                ? "USER REQUEST: The attached image is my screen. Read it directly; the OCR text above is only a rough backup. Respond exactly as your system instructions say (for example, if it mentions LLD, HLD or system design, follow that section)."
+                : "USER REQUEST: This is the text captured from my screen. Respond to it exactly as your system instructions say (for example, if it mentions LLD, HLD or system design, follow that section).");
 
-            await streamingService.StreamResponseAsync(parts.ToString(), systemPrompt, history: history.GetRecentDialogue());
+            await streamingService.StreamResponseAsync(
+                parts.ToString(), systemPrompt, history: history.GetRecentDialogue(), imageBase64: imageBase64);
+        }
+
+        private async Task StreamAnswerForScreenCaptureBatchAsync(
+            IReadOnlyList<PendingCapture> batch,
+            IReadOnlyList<string?> ocrTexts,
+            bool inTranscript)
+        {
+            if (!await EnsureAuthTokenFreshAsync().ConfigureAwait(true))
+                return;
+
+            streamTarget = inTranscript ? StreamTarget.Transcript : StreamTarget.Chat;
+            SetLastQuestion($"Based on {batch.Count} captured screens, explain what would help me right now.", inTranscript);
+
+            string displayLabel = batch.Count == 1 ? "Screen capture" : $"{batch.Count} screen captures";
+            if (inTranscript)
+                AlphaRegion.BeginStreamingAnswerInTranscript(displayLabel);
+            else
+                AlphaRegion.BeginStreamingResponse(displayLabel);
+
+            manualStreaming = true;
+            UpdateStopButton();
+
+            string systemPrompt = GetCurrentSystemPrompt();
+            string context = BuildConversationContext();
+
+            var wireParts = new List<StreamingResponseService.MessagePart>();
+            if (!string.IsNullOrEmpty(context))
+                wireParts.Add(StreamingResponseService.MessagePart.TextBlock(context.TrimEnd()));
+
+            for (int i = 0; i < batch.Count; i++)
+            {
+                string ocr = string.IsNullOrWhiteSpace(ocrTexts[i])
+                    ? "(OCR found no text)"
+                    : ocrTexts[i]!;
+                wireParts.Add(StreamingResponseService.MessagePart.TextBlock(
+                    $"SCREEN CAPTURE {i + 1} of {batch.Count} (OCR, rough backup only):\n---\n{ocr}\n---"));
+                wireParts.Add(StreamingResponseService.MessagePart.ImagePng(batch[i].Base64));
+            }
+
+            wireParts.Add(StreamingResponseService.MessagePart.TextBlock(
+                "USER REQUEST: The attached images are my screens in order. Read each image directly; " +
+                "the OCR text above each image is only a rough backup. Respond exactly as your system " +
+                "instructions say (for example, if it mentions LLD, HLD or system design, follow that section)."));
+
+            await streamingService.StreamResponseAsync(
+                $"Multi-screen capture ({batch.Count} images).",
+                systemPrompt,
+                history: history.GetRecentDialogue(),
+                parts: wireParts);
+        }
+
+        private void RefreshPendingCapturesUi()
+        {
+            try
+            {
+                if (PendingCapturesHost == null || PendingCapturesPanel == null) return;
+
+                PendingCapturesPanel.Children.Clear();
+                bool show = pendingCaptures.Count > 0;
+                PendingCapturesHost.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+                if (!show) return;
+
+                for (int i = 0; i < pendingCaptures.Count; i++)
+                {
+                    int index = i;
+                    var item = pendingCaptures[i];
+
+                    var thumb = new Border
+                    {
+                        Width = 96,
+                        Height = 60,
+                        CornerRadius = new CornerRadius(8),
+                        BorderBrush = new SolidColorBrush(Color.FromRgb(0x52, 0x52, 0x5B)),
+                        BorderThickness = new Thickness(1),
+                        Margin = new Thickness(0, 0, 8, 0),
+                        Background = new SolidColorBrush(Color.FromRgb(0x27, 0x27, 0x2A)),
+                        ClipToBounds = true,
+                    };
+
+                    var grid = new Grid();
+                    if (item.Thumbnail != null)
+                    {
+                        grid.Children.Add(new Image
+                        {
+                            Source = item.Thumbnail,
+                            Stretch = Stretch.UniformToFill,
+                        });
+                    }
+
+                    grid.Children.Add(new Border
+                    {
+                        Background = new SolidColorBrush(Color.FromArgb(0xB3, 0x00, 0x00, 0x00)),
+                        HorizontalAlignment = HorizontalAlignment.Left,
+                        VerticalAlignment = VerticalAlignment.Top,
+                        Margin = new Thickness(4),
+                        CornerRadius = new CornerRadius(4),
+                        Padding = new Thickness(5, 1, 5, 1),
+                        Child = new TextBlock
+                        {
+                            Text = (index + 1).ToString(),
+                            Foreground = Brushes.White,
+                            FontSize = 11,
+                            FontWeight = FontWeights.SemiBold,
+                        }
+                    });
+
+                    var remove = new Button
+                    {
+                        Content = "×",
+                        Width = 18,
+                        Height = 18,
+                        FontSize = 12,
+                        Padding = new Thickness(0),
+                        Margin = new Thickness(0, 2, 2, 0),
+                        HorizontalAlignment = HorizontalAlignment.Right,
+                        VerticalAlignment = VerticalAlignment.Top,
+                        Cursor = Cursors.Hand,
+                        ToolTip = "Remove from batch",
+                        Background = new SolidColorBrush(Color.FromArgb(0xCC, 0x00, 0x00, 0x00)),
+                        Foreground = Brushes.White,
+                        BorderThickness = new Thickness(0),
+                    };
+                    remove.Click += (_, _) =>
+                    {
+                        if (index >= 0 && index < pendingCaptures.Count)
+                        {
+                            pendingCaptures.RemoveAt(index);
+                            RefreshPendingCapturesUi();
+                        }
+                    };
+                    grid.Children.Add(remove);
+                    thumb.Child = grid;
+                    PendingCapturesPanel.Children.Add(thumb);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Screen] Pending UI error: {ex.Message}");
+            }
+        }
+
+        private static ImageSource? TryCreateThumbnail(string base64)
+        {
+            try
+            {
+                byte[] bytes = Convert.FromBase64String(base64);
+                using var ms = new MemoryStream(bytes);
+                var bmp = new BitmapImage();
+                bmp.BeginInit();
+                bmp.StreamSource = ms;
+                bmp.DecodePixelWidth = 160;
+                bmp.CacheOption = BitmapCacheOption.OnLoad;
+                bmp.EndInit();
+                bmp.Freeze();
+                return bmp;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private void CopyAnswer_Click(object sender, RoutedEventArgs e)
@@ -1492,8 +2087,8 @@ namespace SnapEye
 
             return modePrompt +
                 "\n\nIMPORTANT: You have access to the live conversation transcript provided in the user message. " +
-                "Use it to give context-aware answers. Never say you don't have access to the conversation. " +
-                "Be concise and use markdown for readability.";
+                "Never say you don't have access to the conversation. " +
+                "Put code, ASCII diagrams, and anything that depends on alignment inside ``` fenced code blocks.";
         }
 
         private string BuildConversationContext()
@@ -2190,6 +2785,10 @@ namespace SnapEye
                 // Remove the global Backtick+Space keyboard hook.
                 try { micMuteHook?.Dispose(); } catch { }
                 micMuteHook = null;
+
+                // Remove the global mouse-wheel hook.
+                try { wheelHook?.Dispose(); } catch { }
+                wheelHook = null;
             }
             catch (Exception ex)
             {

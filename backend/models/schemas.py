@@ -163,7 +163,7 @@ class SearchResponse(BaseModel):
                 "success": True,
                 "result": "Artificial intelligence is...",
                 "timestamp": "2024-01-01T00:00:00",
-                "model": "claude-haiku-4-5-20251001",
+                "model": "claude-haiku-5-5",
                 "search_type": "text",
                 "metadata": {
                     "tokens_used": 150,

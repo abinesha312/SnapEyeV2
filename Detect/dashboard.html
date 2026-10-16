@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Focus Detect — live dashboard</title>
+  <style>
+    :root {
+      --bg: #0c0f14;
+      --panel: #141a22;
+      --border: #243041;
+      --text: #e8eef7;
+      --muted: #8b9bb0;
+      --accent: #3b82f6;
+      --danger: #f87171;
+      --danger-bg: #3f1515;
+      --ok: #34d399;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      align-items: flex-start;
+      justify-content: space-between;
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, #121821 0%, var(--bg) 100%);
+    }
+    h1 { margin: 0 0 6px; font-size: 1.35rem; font-weight: 650; letter-spacing: -0.02em; }
+    .sub { color: var(--muted); font-size: 0.9rem; max-width: 52rem; line-height: 1.45; }
+    .legend {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 0.85rem;
+      max-width: 52rem;
+    }
+    .legend strong { color: var(--danger); }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    button {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      padding: 8px 14px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.875rem;
+    }
+    button:hover { border-color: var(--accent); }
+    button.danger:hover { border-color: var(--danger); color: var(--danger); }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      padding: 16px 24px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 14px;
+    }
+    .card .label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .card .value { margin-top: 6px; font-size: 1.05rem; font-weight: 600; word-break: break-word; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--muted); }
+    .dot.on { background: var(--ok); box-shadow: 0 0 8px rgba(52, 211, 153, 0.5); }
+    main { padding: 0 24px 32px; }
+    .table-wrap {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: auto;
+      max-height: calc(100vh - 280px);
+      background: var(--panel);
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th {
+      position: sticky; top: 0;
+      background: #1a222d;
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      z-index: 1;
+    }
+    tr.snapeye { background: var(--danger-bg); }
+    tr.snapeye td { border-bottom-color: #5a2020; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      background: #7f1d1d;
+      color: #fecaca;
+    }
+    .muted { color: var(--muted); }
+    code { font-family: Consolas, "Cascadia Code", monospace; font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Focus Detect</h1>
+      <div class="sub">Live Windows foreground / focus changes. Use this while testing SnapEye to see if focus is stolen.</div>
+      <div class="legend">
+        If you are typing in Notepad (or another app) and <strong>SnapEye rows</strong> appear in the feed,
+        keyboard focus was stolen. Nudge / resize / Pause should not produce SnapEye rows unless you click into SnapEye.
+      </div>
+    </div>
+    <div class="controls">
+      <button id="btnScroll" type="button">Pause auto-scroll</button>
+      <button id="btnClear" class="danger" type="button">Clear log</button>
+    </div>
+  </header>
+
+  <section class="stats">
+    <div class="card">
+      <div class="label">Watcher</div>
+      <div class="value"><span id="statusDot" class="dot"></span><span id="statusText">connecting…</span></div>
+    </div>
+    <div class="card">
+      <div class="label">Total events</div>
+      <div class="value" id="totalCount">0</div>
+    </div>
+    <div class="card">
+      <div class="label">Last focus</div>
+      <div class="value" id="lastFocus">—</div>
+    </div>
+  </section>
+
+  <main>
+    <div class="table-wrap" id="tableWrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Time</th>
+            <th>Process</th>
+            <th>PID</th>
+            <th>Title</th>
+            <th>Class</th>
+            <th>Flag</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </main>
+
+  <script>
+    let since = 0;
+    let autoScroll = true;
+    let rowIndex = 0;
+
+    const tbody = document.getElementById("tbody");
+    const tableWrap = document.getElementById("tableWrap");
+    const statusDot = document.getElementById("statusDot");
+    const statusText = document.getElementById("statusText");
+    const totalCount = document.getElementById("totalCount");
+    const lastFocus = document.getElementById("lastFocus");
+    const btnScroll = document.getElementById("btnScroll");
+    const btnClear = document.getElementById("btnClear");
+
+    function fmtTime(ts) {
+      try {
+        const d = new Date(ts);
+        return d.toLocaleTimeString(undefined, { hour12: false }) + "." +
+          String(d.getMilliseconds()).padStart(3, "0");
+      } catch {
+        return ts;
+      }
+    }
+
+    function addRows(events) {
+      for (const e of events) {
+        rowIndex += 1;
+        const tr = document.createElement("tr");
+        if (e.is_snapeye) tr.className = "snapeye";
+        tr.innerHTML =
+          `<td class="muted">${rowIndex}</td>` +
+          `<td><code>${fmtTime(e.ts)}</code></td>` +
+          `<td>${escapeHtml(e.process || "—")}</td>` +
+          `<td class="muted">${e.pid ?? "—"}</td>` +
+          `<td>${escapeHtml(e.title || "(no title)")}</td>` +
+          `<td class="muted">${escapeHtml(e.class_name || "")}</td>` +
+          `<td>${e.is_snapeye ? '<span class="badge">SnapEye</span>' : ""}</td>`;
+        tbody.appendChild(tr);
+        lastFocus.textContent = `${e.process || "?"} — ${e.title || "(no title)"}`;
+      }
+      if (autoScroll) tableWrap.scrollTop = tableWrap.scrollHeight;
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    async function pollEvents() {
+      try {
+        const res = await fetch(`/api/events?since=${since}`);
+        const data = await res.json();
+        totalCount.textContent = String(data.total ?? 0);
+        if (Array.isArray(data.events) && data.events.length) {
+          addRows(data.events);
+          since = data.total;
+        } else if (typeof data.total === "number" && data.total < since) {
+          // Log was cleared or truncated from the front.
+          tbody.innerHTML = "";
+          rowIndex = 0;
+          since = 0;
+        }
+      } catch (err) {
+        statusText.textContent = "API error";
+        statusDot.classList.remove("on");
+      }
+    }
+
+    async function pollStatus() {
+      try {
+        const res = await fetch("/api/status");
+        const data = await res.json();
+        if (data.watcher_running) {
+          statusDot.classList.add("on");
+          statusText.textContent = "watching";
+        } else {
+          statusDot.classList.remove("on");
+          statusText.textContent = "stopped";
+        }
+        if (typeof data.total === "number") totalCount.textContent = String(data.total);
+      } catch {
+        statusDot.classList.remove("on");
+        statusText.textContent = "offline";
+      }
+    }
+
+    btnScroll.addEventListener("click", () => {
+      autoScroll = !autoScroll;
+      btnScroll.textContent = autoScroll ? "Pause auto-scroll" : "Resume auto-scroll";
+    });
+
+    btnClear.addEventListener("click", async () => {
+      if (!confirm("Clear all focus events?")) return;
+      await fetch("/api/clear", { method: "POST" });
+      tbody.innerHTML = "";
+      rowIndex = 0;
+      since = 0;
+      totalCount.textContent = "0";
+      lastFocus.textContent = "—";
+    });
+
+    pollStatus();
+    pollEvents();
+    setInterval(pollEvents, 500);
+    setInterval(pollStatus, 2000);
+  </script>
+</body>
+</html>

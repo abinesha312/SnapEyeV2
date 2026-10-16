@@ -56,16 +56,43 @@ namespace SnapEye.Services
         }
 
         /// <summary>
+        /// One ordered multimodal part for /api/llm/stream (text or base64 PNG image).
+        /// </summary>
+        public readonly record struct MessagePart(string Type, string? Text = null, string? Data = null)
+        {
+            public static MessagePart TextBlock(string text) => new("text", Text: text);
+            public static MessagePart ImagePng(string base64) => new("image", Data: base64);
+
+            public object ToWire() => Type == "image"
+                ? new { type = "image", data = Data ?? "" }
+                : new { type = "text", text = Text ?? "" };
+        }
+
+        /// <summary>
         /// Stream a response from the LLM endpoint.
+        /// Pass <paramref name="imageBase64"/> for a single attachment, or
+        /// <paramref name="parts"/> for interleaved text1/image1/text2/image2…
         /// </summary>
         public async Task StreamResponseAsync(
             string userMessage,
             string? systemPrompt = null,
             string? provider = null,
-            IReadOnlyList<(string Role, string Content)>? history = null)
+            IReadOnlyList<(string Role, string Content)>? history = null,
+            string? imageBase64 = null,
+            IReadOnlyList<MessagePart>? parts = null)
         {
             var messages = ToWireHistory(history);
-            messages.Add(new { role = "user", content = userMessage });
+            if (parts != null && parts.Count > 0)
+            {
+                var wireParts = new List<object>(parts.Count);
+                foreach (var p in parts)
+                    wireParts.Add(p.ToWire());
+                messages.Add(new { role = "user", content = userMessage, parts = wireParts });
+            }
+            else if (string.IsNullOrEmpty(imageBase64))
+                messages.Add(new { role = "user", content = userMessage });
+            else
+                messages.Add(new { role = "user", content = userMessage, images = new[] { imageBase64 } });
 
             var (activeProvider, activeModel, activeKey) = ResolveAiCredentials(provider);
 

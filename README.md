@@ -39,7 +39,7 @@ Design a notification service to send Emails and SMS.
 - Automatic context injection into AI conversations
 
 ### 🤖 AI-Powered Intelligence
-- **Multi-provider support**: OpenAI GPT-4o, Anthropic Claude
+- **Multi-provider support**: OpenAI gpt-6-luna, Anthropic Claude
 - Streaming responses for real-time feedback
 - RAG (Retrieval-Augmented Generation) with ChromaDB
 - Customizable AI modes (Interview, Sales, Meeting Notes, etc.)
@@ -168,11 +168,15 @@ Backend will be available at:
 |----------|--------|
 | `Ctrl+Shift+L` | Toggle listening (start/stop transcription) |
 | `Ctrl+Shift+S` | Screenshot & OCR |
+| `Ctrl+Shift+P` | Toggle capture Pause / Play (batch screenshots) |
 | `Ctrl+Shift+C` | Copy current AI answer |
 | `Ctrl+Shift+H` | Hide/show overlay |
-| `Ctrl+Shift+Up` | Expand Live Insights panel |
-| `Ctrl+Shift+Down` | Collapse Live Insights panel |
-| `Ctrl+Alt+←/→/↑/↓` | Nudge overlay position (28px increments) |
+| `Ctrl+Shift+Down` | Expand Live Insights panel |
+| `Ctrl+Shift+Up` | Collapse Live Insights panel |
+| `Ctrl+Alt+←/→/↑/↓` | Move overlay (hold to keep moving) |
+| `Ctrl+Alt+Z` | Toggle clickable (Island Bar ON/OFF) |
+| `Ctrl+Space+>` | Increase overlay opacity |
+| `Ctrl+Space+<` | Decrease overlay opacity |
 | `Ctrl+Enter` | Send message in chat |
 
 ### Features

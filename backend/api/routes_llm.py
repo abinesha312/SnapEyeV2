@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from config import settings
 from security import auth_handler
+from services.context_service import mode_prompt_with_grounding
 from services.llm_router import (
     llm_router,
     LLMMessage,
@@ -31,7 +32,9 @@ class LLMRequest(BaseModel):
     """Request body for LLM generation."""
     messages: List[dict] = Field(
         ...,
-        description="List of messages with 'role' and 'content' fields",
+        description="List of messages with 'role' and 'content' fields, plus optional "
+                    "'images' (base64 PNG strings) or ordered 'parts' "
+                    "([{type:text|image, text?/data?}]) on user messages",
     )
     system_prompt: Optional[str] = Field(
         default=None,
@@ -126,7 +129,15 @@ async def stream_llm(
     user_data=Depends(auth_handler.verify_auth),
 ):
     """Stream LLM response token-by-token via SSE."""
-    messages = [LLMMessage(role=m["role"], content=m["content"]) for m in request.messages]
+    messages = [
+        LLMMessage(
+            role=m["role"],
+            content=m.get("content") or "",
+            images=m.get("images"),
+            parts=m.get("parts"),
+        )
+        for m in request.messages
+    ]
 
     if request.stream:
         return StreamingResponse(
@@ -217,6 +228,7 @@ async def context_stream_llm(
 
     # Always apply the grounding/human-answer rules, and strictly prepend the selected mode's
     # template (sent by the client as system_prompt) so the chosen mode governs every query.
+    has_mode = bool(request.system_prompt and request.system_prompt.strip())
     system_prompt = _build_assistant_system_prompt(
         is_interview, mode_prompt=request.system_prompt,
         quick_action=request.quick_action, expand=request.expand,
@@ -236,8 +248,12 @@ async def context_stream_llm(
         role=request.role,
         is_interview=is_interview,
         experience_searched=request.use_profile,
+        mode_governs=has_mode,
     )
-    if request.quick_action:
+    if has_mode:
+        if request.expand:
+            user_content += "\n\n" + _EXPAND_TASK
+    elif request.quick_action:
         user_content += "\n\n" + _QUICK_ACTION_RULE
     elif request.expand:
         user_content += "\n\n" + _EXPAND_RULE
@@ -250,7 +266,8 @@ async def context_stream_llm(
             max_tokens=(
                 settings.LLM_QUICK_ACTION_MAX_TOKENS if request.quick_action
                 else settings.LLM_EXPAND_MAX_TOKENS if request.expand
-                else settings.LLM_QUICK_MAX_TOKENS
+                # Ask AI / chat (incl. mode-governed interview answers): full budget.
+                else settings.LLM_MAX_TOKENS
             ),
             provider=request.provider,
             api_key=request.api_key,
@@ -371,15 +388,25 @@ _EXPAND_RULE = (
 )
 
 
+_EXPAND_TASK = (
+    "EXPLAIN MORE: expand the PREVIOUS ANSWER quoted in this message instead of answering a "
+    "new question, using the format your system instructions require."
+)
+
+
 def _build_assistant_system_prompt(
     is_interview: bool = False, mode_prompt: str = "", quick_action: bool = False,
     expand: bool = False,
 ) -> str:
     """Build the default system prompt: a human, first-person, story-driven assistant.
 
-    When ``mode_prompt`` (the client's selected-mode template) is supplied it is strictly
-    prepended so the active mode governs the answer, on top of the grounding rules below.
+    When ``mode_prompt`` (the client's selected-mode template) is supplied it governs the
+    answer on its own; only the minimal grounding rules are added, since the default style
+    rules (story telling, word limits, no lists) contradict user-written mode formats.
     """
+    if mode_prompt and mode_prompt.strip():
+        return mode_prompt_with_grounding(mode_prompt)
+
     base = (
         "You are SnapEye, a real-time assistant that speaks AS the user (first person, \"I\"). "
         "You HAVE access to the conversation transcript and the user's real background provided "
@@ -417,11 +444,6 @@ def _build_assistant_system_prompt(
         base += "\n\n" + _QUICK_ACTION_RULE
     elif expand:
         base += "\n\n" + _EXPAND_RULE
-    if mode_prompt and mode_prompt.strip():
-        base = (
-            "ACTIVE MODE (follow these instructions strictly):\n"
-            f"{mode_prompt.strip()}\n\n" + base
-        )
     return base
 
 
@@ -438,6 +460,7 @@ def _build_context_message(
     role: str = "",
     is_interview: bool = False,
     experience_searched: bool = False,
+    mode_governs: bool = False,
 ) -> str:
     """Build the user message combining all available context."""
     parts = [f"**Question:** {question}"]
@@ -509,6 +532,9 @@ def _build_context_message(
         )
 
     parts.append(
+        "\nAnswer the question exactly as your system instructions say, using my background and "
+        "the context above where relevant."
+        if mode_governs else
         "\nAnswer the question using my background and the context above. If my background is "
         "relevant, answer in the first person about what I actually did."
     )

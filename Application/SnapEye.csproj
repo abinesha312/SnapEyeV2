@@ -8,6 +8,7 @@
     <AssemblyName>SnapEye</AssemblyName>
     <Nullable>enable</Nullable>
     <ApplicationIcon>Public\Logo\SnapEye.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <StartupObject />
   </PropertyGroup>
 

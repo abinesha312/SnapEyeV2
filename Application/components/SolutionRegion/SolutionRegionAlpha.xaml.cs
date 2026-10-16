@@ -467,11 +467,12 @@ namespace SnapEye.SolutionRegion
         /// </summary>
         private Grid BuildAnswerContent(string markdown, out MarkdownViewer viewer)
         {
-            viewer = new MarkdownViewer
+            viewer = new SnapEyeMarkdownViewer
             {
                 Background = Brushes.Transparent,
                 Foreground = new SolidColorBrush(BubbleTextColor),
-                Markdown = markdown ?? ""
+                Pipeline = MarkdownRendering.Pipeline,
+                Markdown = MarkdownRendering.Prepare(markdown)
             };
             ApplyMarkdownTheme(viewer);
 
@@ -1028,11 +1029,12 @@ namespace SnapEye.SolutionRegion
         /// <summary>Themed MarkdownViewer sized to fit inside a transcript answer bubble.</summary>
         private MarkdownViewer BuildBubbleMarkdownViewer(string markdown)
         {
-            var viewer = new MarkdownViewer
+            var viewer = new SnapEyeMarkdownViewer
             {
                 Background = Brushes.Transparent,
                 Foreground = new SolidColorBrush(BubbleTextColor),
-                Markdown = markdown ?? "",
+                Pipeline = MarkdownRendering.Pipeline,
+                Markdown = MarkdownRendering.Prepare(markdown),
                 MaxWidth = bubbleMaxWidth,
             };
             ApplyMarkdownTheme(viewer);
@@ -1311,17 +1313,91 @@ namespace SnapEye.SolutionRegion
         /// Forwards wheel events to the outer <see cref="ScrollViewer"/> so that inner scroll-aware
         /// controls (e.g. Markdig's <c>MarkdownViewer</c> / <c>FlowDocumentScrollViewer</c>) can't
         /// swallow the wheel event and stall the conversation list from scrolling.
+        /// Shift+wheel over a code-block H-scroller pans that block horizontally; plain wheel
+        /// always scrolls the conversation vertically so wide code blocks don't trap the cursor.
+        /// (Trackpad sideways swipe is handled by <see cref="Services.WheelCaptureHook"/> via
+        /// <see cref="TryScrollCodeBlockAt"/> — WPF has no MouseHWheel routed event.)
         /// </summary>
         private void OuterScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
         {
             if (sender is not ScrollViewer sv) return;
             if (e.Delta == 0) return;
 
-            // WPF's default wheel step is 48 DIPs per notch (≈120 delta units); match it.
             double step = -e.Delta / 120.0 * 48.0;
+
+            bool shift = (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift;
+            if (shift)
+            {
+                var codeScroll = FindTaggedScrollViewer(
+                    e.OriginalSource as DependencyObject,
+                    NonWrappingCodeBlockRenderer.CodeBlockScrollTag);
+                if (codeScroll != null && codeScroll.ScrollableWidth > 0)
+                {
+                    codeScroll.ScrollToHorizontalOffset(
+                        Math.Max(0, Math.Min(codeScroll.ScrollableWidth, codeScroll.HorizontalOffset + step)));
+                    e.Handled = true;
+                    return;
+                }
+            }
+
+            // WPF's default wheel step is 48 DIPs per notch (≈120 delta units); match it.
             double target = Math.Max(0, Math.Min(sv.ScrollableHeight, sv.VerticalOffset + step));
             sv.ScrollToVerticalOffset(target);
             e.Handled = true;
+        }
+
+        private static ScrollViewer? FindTaggedScrollViewer(DependencyObject? start, string tag)
+        {
+            for (DependencyObject? d = start; d != null; d = VisualTreeHelper.GetParent(d))
+            {
+                if (d is ScrollViewer sc && Equals(sc.Tag, tag))
+                    return sc;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Scrolls whichever view is showing (chat or transcript) by <paramref name="wheelDelta"/>
+        /// (120 per notch, positive = up). Used when the overlay is click-through, where
+        /// wheel events never reach WPF and have to be forwarded by a global hook.
+        /// </summary>
+        public void ScrollActiveView(int wheelDelta)
+        {
+            var sv = TranscriptionViewRoot.Visibility == Visibility.Visible ? TranscriptionView : ChatView;
+            double step = -wheelDelta / 120.0 * 48.0;
+            sv.ScrollToVerticalOffset(Math.Max(0, Math.Min(sv.ScrollableHeight, sv.VerticalOffset + step)));
+        }
+
+        /// <summary>
+        /// If the screen point is over a wide fenced-code <see cref="ScrollViewer"/>, pan it
+        /// horizontally by <paramref name="wheelDelta"/> (120 per notch). Used for trackpad
+        /// <c>WM_MOUSEHWHEEL</c> and Shift+wheel from the global wheel hook.
+        /// </summary>
+        public bool TryScrollCodeBlockAt(int screenX, int screenY, int wheelDelta)
+        {
+            try
+            {
+                Point local = PointFromScreen(new Point(screenX, screenY));
+                if (local.X < 0 || local.Y < 0 || local.X > ActualWidth || local.Y > ActualHeight)
+                    return false;
+
+                var hit = VisualTreeHelper.HitTest(this, local);
+                var codeScroll = FindTaggedScrollViewer(
+                    hit?.VisualHit,
+                    NonWrappingCodeBlockRenderer.CodeBlockScrollTag);
+                if (codeScroll == null || codeScroll.ScrollableWidth <= 0)
+                    return false;
+
+                double step = -wheelDelta / 120.0 * 48.0;
+                codeScroll.ScrollToHorizontalOffset(
+                    Math.Max(0, Math.Min(codeScroll.ScrollableWidth, codeScroll.HorizontalOffset + step)));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SolutionRegion] Code H-scroll error: {ex.Message}");
+                return false;
+            }
         }
 
         private void SafeInvoke(Action action)

@@ -785,7 +785,9 @@ class DeepgramLiveTranscriptionService:
                     async for token in llm_router.generate_stream(
                         messages,
                         system_prompt=context["system_prompt"],
-                        max_tokens=700,
+                        # Same budget as Ask AI / chat (/api/llm/stream default &
+                        # context-stream non-quick answers), not the short "quick" cap.
+                        max_tokens=settings.LLM_MAX_TOKENS,
                         temperature=0.7,
                     ):
                         try:

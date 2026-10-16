@@ -80,16 +80,16 @@ class Settings(BaseSettings):
     
     # OpenAI Configuration
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    OPENAI_MODEL: str = "gpt-4o"
+    OPENAI_MODEL: str = "gpt-6-luna"
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
     
     # Anthropic Configuration
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
-    ANTHROPIC_MODEL: str = "claude-haiku-4-5-20251001"
+    ANTHROPIC_MODEL: str = "claude-haiku-5-5"
 
     # Google Gemini Configuration (server-side default; per-request override supported)
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_MODEL: str = "gemini-3.8-flash"
 
     # xAI / Grok Configuration (OpenAI-compatible; per-request override supported)
     XAI_API_KEY: str = os.getenv("XAI_API_KEY", "")
@@ -129,13 +129,13 @@ class Settings(BaseSettings):
     LLM_RACE_ENABLED: bool = True
     LLM_RACE_PROVIDERS: list = ["openai", "anthropic"]
     LLM_RACE_OPENAI_MODEL: str = "gpt-6-luna"
-    LLM_RACE_ANTHROPIC_MODEL: str = "claude-haiku-4-5-20251001"
+    LLM_RACE_ANTHROPIC_MODEL: str = "claude-haiku-5-5"
     # reasoning_effort sent to OpenAI reasoning models (gpt-5/gpt-6/o-series).
     # "none" = no hidden thinking before the first token (gpt-6 supports none/low/...).
     OPENAI_REASONING_EFFORT: str = "none"
-    # Output cap for quick actions / context answers (prompt asks for ~220 words).
-    LLM_QUICK_MAX_TOKENS: int = 700
-    LLM_QUICK_ACTION_MAX_TOKENS: int = 220
+    # Legacy short cap (kept for config compatibility; live + Ask AI now use LLM_MAX_TOKENS).
+    LLM_QUICK_MAX_TOKENS: int = 2000
+    LLM_QUICK_ACTION_MAX_TOKENS: int = 220  # one-click quick actions only
     LLM_EXPAND_MAX_TOKENS: int = 900  # "Explain more": 250-400 word read
     
     # RAG Configuration

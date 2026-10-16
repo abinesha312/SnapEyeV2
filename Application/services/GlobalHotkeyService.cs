@@ -58,19 +58,19 @@ namespace SnapEye.Services
         }
 
         /// <summary>
-        /// Register a hotkey. Modifiers must be a bitwise OR of <c>MOD_*</c> constants
-        /// (MOD_NOREPEAT is added automatically). Returns <c>true</c> on success; on
-        /// failure raises <see cref="HotkeyRegistrationFailed"/> with a description so the
-        /// caller can surface an inline error.
+        /// Register a hotkey. Modifiers must be a bitwise OR of <c>MOD_*</c> constants.
+        /// By default <see cref="MOD_NOREPEAT"/> is added so a held key fires once.
+        /// Pass <paramref name="allowRepeat"/> true (e.g. Ctrl+Alt+Arrow nudge) so Windows
+        /// keyboard auto-repeat keeps invoking the handler while the key is held.
         /// </summary>
-        public bool Register(uint modifiers, Key wpfKey, Action onPress)
+        public bool Register(uint modifiers, Key wpfKey, Action onPress, bool allowRepeat = false)
         {
             ThrowIfDisposed();
             if (onPress == null) throw new ArgumentNullException(nameof(onPress));
 
             uint vk = (uint)KeyInterop.VirtualKeyFromKey(wpfKey);
             int id = _nextId++;
-            uint flags = modifiers | MOD_NOREPEAT;
+            uint flags = allowRepeat ? modifiers : (modifiers | MOD_NOREPEAT);
 
             bool ok = RegisterHotKey(_src.Handle, id, flags, vk);
             if (!ok)

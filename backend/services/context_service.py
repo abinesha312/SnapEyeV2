@@ -13,6 +13,23 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
+def mode_prompt_with_grounding(mode_prompt: str) -> str:
+    """The user's mode prompt governs format, length and tone; only grounding facts are added."""
+    return (
+        "ACTIVE MODE (follow these instructions strictly - they override any other style, "
+        "format or length preference):\n"
+        f"{mode_prompt.strip()}\n\n"
+        "GROUNDING:\n"
+        "- You HAVE access to the conversation transcript, on-screen text, and the user's real "
+        "background provided in the user message. Never say you lack access.\n"
+        "- Never invent personal facts (employers, dates, projects, numbers) that aren't in the "
+        "user's background.\n"
+        "- Your first words ARE the answer. No filler openers (\"Great question\", \"Sure\").\n"
+        "- Put code, ASCII diagrams, and anything that depends on alignment inside ``` fenced "
+        "code blocks."
+    )
+
+
 @dataclass
 class TranscriptSegment:
     """A single transcript segment in the rolling window."""
@@ -244,12 +261,19 @@ class ContextManager:
                 f"ON-SCREEN TEXT:\n{self._screen_context[:2000]}"
             )
 
-        user_parts.append(
-            f"DETECTED QUESTION FROM CONVERSATION: {question}\n\n"
-            f"Using my background and any other context above, "
-            f"answer the detected question. If my background is relevant, answer in the "
-            f"first person about what I actually did. Be specific and actionable."
-        )
+        if self._mode_system_prompt.strip():
+            user_parts.append(
+                f"DETECTED QUESTION FROM CONVERSATION: {question}\n\n"
+                "Answer the detected question exactly as your system instructions say, using "
+                "my background and any other context above where relevant."
+            )
+        else:
+            user_parts.append(
+                f"DETECTED QUESTION FROM CONVERSATION: {question}\n\n"
+                f"Using my background and any other context above, "
+                f"answer the detected question. If my background is relevant, answer in the "
+                f"first person about what I actually did. Be specific and actionable."
+            )
 
         if not system_prompt:
             system_prompt = self._default_system_prompt()
@@ -267,9 +291,14 @@ class ContextManager:
         """
         Human, first-person, STAR-style assistant prompt. Answers sound like a real
         person recounting their work — the challenge, what they did (including the
-        workflow/architecture), and the value delivered to the business — with genuine
+        workflow/architecture), and the value delivered to the business —         with genuine
         emotion and reflection rather than robotic bullet dumps.
+
+        When the user selected a mode, its prompt replaces these style rules entirely.
         """
+        if self._mode_system_prompt.strip():
+            return mode_prompt_with_grounding(self._mode_system_prompt)
+
         base = (
             "You are SnapEye, a real-time assistant that speaks AS the user (first person, \"I\"). "
             "You DO have access to the live conversation transcript and the user's real background "
@@ -301,13 +330,6 @@ class ContextManager:
             base += (
                 "\n\nINTERVIEW MODE: Follow the ACTIVE MODE instructions above. Present me as a "
                 "strong, likeable candidate while staying truthful to my real experience."
-            )
-        # Prepend the active mode's instructions so the mode the user picked is strictly
-        # applied to every live suggestion, on top of the grounding rules above.
-        if self._mode_system_prompt.strip():
-            base = (
-                "ACTIVE MODE (follow these instructions strictly):\n"
-                f"{self._mode_system_prompt.strip()}\n\n" + base
             )
         return base
 
