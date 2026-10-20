@@ -30,16 +30,37 @@ namespace SnapEye.Services
         private const float SilenceThreshold = 0.001f;
 
         // Silence right after speech is still forwarded (up to this long) so Deepgram
-        // hears the pause and endpoints the other party's utterance immediately; longer
-        // silence is dropped to avoid streaming dead air.
-        private const double SilenceTailMaxMs = 1000;
+        // can reach its ~2.5s speaker endpointing window; longer silence is dropped to
+        // avoid streaming dead air. Must be >= LIVE_SPEAKER_ENDPOINTING_MS / idle finalize.
+        private const double SilenceTailMaxMs = 3000;
         private double silenceTailSentMs = SilenceTailMaxMs;
+
+        // Last time non-silent system audio was heard (UTC ticks). Used to gate mic
+        // transcription so loopback from speakers is not transcribed as "You".
+        private long lastSystemVoiceUtcTicks;
+        /// <summary>
+        /// How long after the last system-audio voice sample we still treat speakers as
+        /// "active" and suppress mic send (covers brief pauses mid-utterance).
+        /// </summary>
+        public const double SystemAudioMicSuppressHangoverMs = 600;
 
         public event EventHandler<SpeakerAudioEventArgs>? AudioDataAvailable;
         public event EventHandler<string>? ErrorOccurred;
         public event EventHandler<string>? StatusChanged;
 
         public bool IsCapturing => isCapturing;
+
+        /// <summary>
+        /// True while system/speaker output has recent non-silent audio (plus hangover).
+        /// Overlay drops mic chunks during this window so Other's voice is not transcribed
+        /// on the microphone stream.
+        /// </summary>
+        public bool IsSystemAudioActive(double hangoverMs = SystemAudioMicSuppressHangoverMs)
+        {
+            if (lastSystemVoiceUtcTicks == 0) return false;
+            double elapsedMs = (DateTime.UtcNow.Ticks - lastSystemVoiceUtcTicks) / 10000.0;
+            return elapsedMs >= 0 && elapsedMs < hangoverMs;
+        }
 
         private void LogInfo(string message)
         {
@@ -159,6 +180,9 @@ namespace SnapEye.Services
                 }
 
                 bool silent = IsSilence(pcmData);
+                if (!silent)
+                    lastSystemVoiceUtcTicks = DateTime.UtcNow.Ticks;
+
                 if (silent && silenceTailSentMs >= SilenceTailMaxMs)
                 {
                     return;
@@ -304,6 +328,8 @@ namespace SnapEye.Services
                 captureDevice?.Dispose();
                 captureDevice = null;
                 isCapturing = false;
+                lastSystemVoiceUtcTicks = 0;
+                silenceTailSentMs = SilenceTailMaxMs;
             }
             catch (Exception ex)
             {

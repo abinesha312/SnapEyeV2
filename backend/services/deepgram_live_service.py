@@ -26,6 +26,65 @@ from services.realtime_service import AudioMessage
 logger = logging.getLogger(__name__)
 
 
+def _build_live_ai_logger() -> logging.Logger:
+    """One line per live-answer lifecycle event in backend/logs/live_ai.log."""
+    lg = logging.getLogger("snapeye.live_ai")
+    if not lg.handlers:
+        try:
+            log_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs"
+            )
+            os.makedirs(log_dir, exist_ok=True)
+            fh = logging.FileHandler(os.path.join(log_dir, "live_ai.log"), encoding="utf-8")
+            fh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+            lg.addHandler(fh)
+            lg.setLevel(logging.INFO)
+        except Exception as e:
+            logger.warning(f"live_ai.log unavailable: {e}")
+    return lg
+
+
+live_ai_log = _build_live_ai_logger()
+
+
+def _norm_text(text: str) -> str:
+    text = re.sub(r"[^\w\s]", "", (text or "").lower())
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _same_utterance(a: str, b: str) -> bool:
+    """True when two transcripts are the same speech heard on both streams."""
+    na, nb = _norm_text(a), _norm_text(b)
+    if not na or not nb:
+        return False
+    if na in nb or nb in na:
+        return True
+    return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.6
+
+# PCM16 mono RMS below this ≈ silence (matches SpeakerCaptureService ~0.001).
+_PCM16_SILENCE_RMS = 0.001
+
+
+def _pcm16_is_silent(audio_data: bytes) -> bool:
+    """True when a PCM16 little-endian mono buffer is effectively silence."""
+    if not audio_data or len(audio_data) < 2:
+        return True
+    n = len(audio_data) // 2
+    if n <= 0:
+        return True
+    # Sample every other sample for cheap RMS on hot path.
+    total = 0.0
+    count = 0
+    for i in range(0, n, 2):
+        sample = int.from_bytes(audio_data[i * 2 : i * 2 + 2], "little", signed=True)
+        v = sample / 32768.0
+        total += v * v
+        count += 1
+    if count == 0:
+        return True
+    return (total / count) ** 0.5 < _PCM16_SILENCE_RMS
+
+
 class DeepgramLiveTranscriptionService:
     """
     Real-time streaming transcription with endpointing and interim results
@@ -114,6 +173,10 @@ class DeepgramLiveTranscriptionService:
         # every in-flight AI task except `task` (wired by DualDeepgramSession).
         self.answer_on_utterance_end = False
         self._preempt_hook: Optional[Callable] = None
+        # In-flight answer bookkeeping: once tokens are on screen the answer is never
+        # auto-cancelled (only the user's Stop cancels it).
+        self._ai_tokens_sent = 0
+        self._ai_active_question = ""
         self._finalize_sent = False
         self.idle_finalize_task: Optional[asyncio.Task] = None
         
@@ -259,8 +322,13 @@ class DeepgramLiveTranscriptionService:
             if len(audio_data) == 0:
                 return False
 
-            self.last_audio_time = time.time()
-            self._finalize_sent = False
+            # Idle finalize must measure silence from last VOICE, not from silence
+            # packets / KeepAlive tails — otherwise the 3s auto-answer timer never settles.
+            if not _pcm16_is_silent(audio_data):
+                self.last_audio_time = time.time()
+                self._finalize_sent = False
+            elif self.last_audio_time is None:
+                self.last_audio_time = time.time()
             
             # Add to buffer
             self.audio_buffer += audio_data
@@ -480,12 +548,17 @@ class DeepgramLiveTranscriptionService:
             
             alternative = alternatives[0]
             transcript = alternative.get("transcript", "")
-            
-            if not transcript or not transcript.strip():
-                return
-            
             is_final = data.get("is_final", False)
             speech_final = data.get("speech_final", False)
+            from_finalize = bool(data.get("from_finalize"))
+
+            # Empty Finalize/speech_final replies still close the utterance so the
+            # speaker auto-answer path can fire after silence.
+            if not transcript or not transcript.strip():
+                if speech_final or (is_final and from_finalize):
+                    await self._handle_endpoint()
+                return
+
             confidence = alternative.get("confidence", 0.0)
 
             # Echo suppression: when the microphone physically picks up the speaker
@@ -567,23 +640,14 @@ class DeepgramLiveTranscriptionService:
                     message_id=str(self.current_message.message_id) if self.current_message else "",
                 )
             
-            # Run keyword/question detection on final segments.
-            # Runs as a background task so streaming the AI answer never blocks
-            # the Deepgram receive loop (keeps transcripts real-time). Skipped if
-            # a previous AI answer is still streaming to avoid interleaved output.
-            if (
-                is_final and not self.answer_on_utterance_end
-                and self._ai_pipeline_enabled and self._keyword_detector
-            ):
-                if self.ai_task is None or self.ai_task.done():
-                    self.ai_task = asyncio.create_task(self._run_detection_pipeline(transcript))
-                else:
-                    logger.debug("AI pipeline busy, skipping trigger for this segment")
+            # Mic (Y) transcripts are never auto-answered — only speaker / system audio
+            # (O) triggers AI via answer_on_utterance_end in _handle_endpoint. Manual
+            # actions (What should I say?, Ask AI) still work from the client.
 
             # Deepgram sets speech_final once endpointing silence is reached (and
             # from_finalize on the reply to our idle Finalize): finalize the message so
             # the next speech starts a fresh one.
-            if speech_final or (is_final and data.get("from_finalize")):
+            if speech_final or (is_final and from_finalize):
                 await self._handle_endpoint()
 
         except Exception as e:
@@ -612,9 +676,16 @@ class DeepgramLiveTranscriptionService:
                     and self._ai_pipeline_enabled and self._keyword_detector
                 ):
                     previous = self.ai_task
-                    self.ai_task = asyncio.create_task(
-                        self._run_detection_pipeline(utterance, preempt=True, previous=previous)
-                    )
+                    if previous is not None and not previous.done():
+                        # Keep ai_task pointing at the streaming answer so Stop still works.
+                        live_ai_log.info(
+                            f"SKIP source={self.source} reason=answer_streaming "
+                            f"utterance={utterance[:120]!r}"
+                        )
+                    else:
+                        self.ai_task = asyncio.create_task(
+                            self._run_detection_pipeline(utterance, preempt=True, previous=previous)
+                        )
 
                 # Notify callback
                 if self.on_transcript_callback:
@@ -649,9 +720,12 @@ class DeepgramLiveTranscriptionService:
         Run keyword/question detection on a final transcript segment.
         If triggered, build context and stream AI suggestion back to client.
 
-        preempt (other-party utterances): any answer already streaming - on either
-        stream - is cancelled so the newest thing the other person said is answered
-        immediately instead of being skipped.
+        preempt (other-party utterances): a mic answer that has not shown any text yet
+        is cancelled so the other party's question goes first. An answer that is
+        already streaming text is never cancelled - that is what cut long STAR answers
+        off mid-Action. If that streaming answer is the mic's copy of this same speech
+        (speaker audio picked up by the microphone), this utterance is skipped as a
+        duplicate; otherwise it waits for the lock and is answered next.
         """
         detection = self._detect(transcript, force_statement=preempt)
         if not detection.triggered:
@@ -659,16 +733,29 @@ class DeepgramLiveTranscriptionService:
 
         if preempt:
             if previous is not None and not previous.done():
-                previous.cancel()
-                await asyncio.gather(previous, return_exceptions=True)
+                live_ai_log.info(
+                    f"SKIP source={self.source} reason=answer_streaming "
+                    f"utterance={transcript[:120]!r}"
+                )
+                return
             if self._preempt_hook is not None:
                 try:
-                    await self._preempt_hook()
+                    state, active_q = await self._preempt_hook(transcript)
                 except Exception as e:
                     logger.debug(f"Pre-empt hook error: {e}")
+                    state, active_q = "idle", ""
+                if state == "streaming" and _same_utterance(active_q, transcript):
+                    live_ai_log.info(
+                        f"SKIP source={self.source} reason=echo_of_streaming_mic_answer "
+                        f"utterance={transcript[:120]!r}"
+                    )
+                    return
         elif self._ai_lock is not None and self._ai_lock.locked():
             # Mic triggers never interrupt an answer that is already streaming.
-            logger.debug(f"AI busy on the other stream, skipping trigger ({self.source})")
+            live_ai_log.info(
+                f"SKIP source={self.source} reason=other_answer_streaming "
+                f"utterance={transcript[:120]!r}"
+            )
             return
 
         acquired = False
@@ -764,6 +851,10 @@ class DeepgramLiveTranscriptionService:
             # disconnected mid-suggestion must never propagate out of this function -
             # it would otherwise abort detection for the rest of this session.
             if self.on_ai_suggestion_callback:
+                self._ai_tokens_sent = 0
+                self._ai_active_question = question
+                answer_parts: List[str] = []
+                live_ai_log.info(f"START source={self.source} question={question[:160]!r}")
                 try:
                     await self.on_ai_suggestion_callback({
                         "type": "ai.suggestion.start",
@@ -772,6 +863,7 @@ class DeepgramLiveTranscriptionService:
                     })
                 except Exception as e:
                     logger.warning(f"ai.suggestion.start callback failed (client likely disconnected): {e}")
+                    live_ai_log.info(f"END source={self.source} reason=start_send_failed err={e}")
                     return
 
                 try:
@@ -790,6 +882,8 @@ class DeepgramLiveTranscriptionService:
                         max_tokens=settings.LLM_MAX_TOKENS,
                         temperature=0.7,
                     ):
+                        self._ai_tokens_sent += 1
+                        answer_parts.append(token)
                         try:
                             await self.on_ai_suggestion_callback({
                                 "type": "ai.suggestion.token",
@@ -797,11 +891,20 @@ class DeepgramLiveTranscriptionService:
                             })
                         except Exception as e:
                             logger.warning(f"ai.suggestion.token callback failed, stopping stream: {e}")
+                            live_ai_log.info(
+                                f"END source={self.source} reason=token_send_failed "
+                                f"words={len(''.join(answer_parts).split())} err={e}"
+                            )
                             return
 
                     from services.rag_service import confidence_from_chunks
                     confidence = confidence_from_chunks(
                         (experience_chunks or []) + (rag_chunks or [])
+                    )
+                    live_ai_log.info(
+                        f"END source={self.source} reason=completed "
+                        f"words={len(''.join(answer_parts).split())} "
+                        f"has_result={'result' in ''.join(answer_parts).lower()}"
                     )
                     try:
                         await self.on_ai_suggestion_callback({
@@ -812,8 +915,12 @@ class DeepgramLiveTranscriptionService:
                         logger.warning(f"ai.suggestion.end callback failed: {e}")
 
                 except asyncio.CancelledError:
-                    # Pre-empted by a newer utterance (or the user hit Stop): close this
-                    # answer card on the client before the next one starts.
+                    # User hit Stop (or a not-yet-streaming mic answer was pre-empted):
+                    # close this answer card on the client before the next one starts.
+                    live_ai_log.info(
+                        f"END source={self.source} reason=cancelled "
+                        f"words={len(''.join(answer_parts).split())}"
+                    )
                     try:
                         await self.on_ai_suggestion_callback({"type": "ai.suggestion.end"})
                     except Exception:
@@ -821,6 +928,10 @@ class DeepgramLiveTranscriptionService:
                     raise
                 except Exception as e:
                     logger.error(f"AI suggestion streaming error: {e}")
+                    live_ai_log.info(
+                        f"END source={self.source} reason=error "
+                        f"words={len(''.join(answer_parts).split())} err={e}"
+                    )
                     try:
                         await self.on_ai_suggestion_callback({
                             "type": "ai.suggestion.error",
@@ -853,13 +964,33 @@ class DeepgramLiveTranscriptionService:
         self._ai_pipeline_enabled = True
         logger.info(f"AI pipeline enabled on transcription service (source={self.source})")
 
-    async def cancel_ai(self) -> bool:
+    async def preempt_ai(self, incoming: str = "") -> Tuple[str, str]:
+        """Pre-empt hook for the other stream. Cancels this stream's answer only if it
+        has not shown any text yet. Returns (state, active_question) where state is
+        "idle", "cancelled", or "streaming" (left running)."""
+        task = self.ai_task
+        if task is None or task.done():
+            return "idle", ""
+        if self._ai_tokens_sent > 0:
+            live_ai_log.info(
+                f"KEEP source={self.source} reason=already_streaming "
+                f"tokens={self._ai_tokens_sent} incoming={incoming[:120]!r}"
+            )
+            return "streaming", self._ai_active_question
+        live_ai_log.info(f"PREEMPT source={self.source} incoming={incoming[:120]!r}")
+        await self.cancel_ai(reason="preempted_before_text")
+        return "cancelled", ""
+
+    async def cancel_ai(self, reason: str = "user_stop") -> bool:
         """Cancel an in-flight AI suggestion for this stream. Cancelling the task unwinds
         _run_detection_pipeline's finally block, which releases the shared AI lock so the
         next question can be answered immediately. Returns True if a task was cancelled."""
         task = self.ai_task
         if task is None or task.done():
             return False
+        live_ai_log.info(
+            f"CANCEL source={self.source} reason={reason} tokens={self._ai_tokens_sent}"
+        )
         task.cancel()
         try:
             await task
@@ -1037,11 +1168,17 @@ class DualDeepgramSession:
             id_offset=0,
             username=username,
         )
+        # Speaker waits ~3s of silence before endpointing so live auto-answers fire
+        # after the other party finishes speaking, not on brief mid-question pauses.
+        speaker_endpointing_ms = max(
+            int(settings.LIVE_SPEAKER_ENDPOINTING_MS),
+            int(settings.LIVE_SPEAKER_IDLE_FINALIZE_SECONDS * 1000),
+        )
         self.speaker = DeepgramLiveTranscriptionService(
             api_key=api_key,
             model=model,
             language=language,
-            endpointing_ms=endpointing_ms,
+            endpointing_ms=speaker_endpointing_ms,
             vad_events=vad_events,
             source="speaker",
             id_offset=self.SPEAKER_ID_OFFSET,
@@ -1055,10 +1192,14 @@ class DualDeepgramSession:
         # Wire echo suppression: mic transcripts are checked against speaker finals.
         self.mic._echo_check = self._is_echo
         self.speaker._record_final = self._record_speaker_final
-        # The other party's speech is answered the moment each utterance ends and
-        # takes priority over an answer still streaming for the user's own speech.
+        # The other party's speech is answered after ~3s of silence (utterance end)
+        # and takes priority over an answer still streaming for the user's own speech.
         self.speaker.answer_on_utterance_end = True
-        self.speaker._preempt_hook = self.mic.cancel_ai
+        self.speaker._preempt_hook = self.mic.preempt_ai
+        logger.info(
+            f"Speaker auto-answer silence: endpointing={speaker_endpointing_ms}ms, "
+            f"idle_finalize={settings.LIVE_SPEAKER_IDLE_FINALIZE_SECONDS}s"
+        )
 
     @staticmethod
     def _normalize(text: str) -> str:

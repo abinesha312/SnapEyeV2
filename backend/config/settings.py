@@ -168,13 +168,17 @@ class Settings(BaseSettings):
     
     # Keyword Detection
     KEYWORD_DEBOUNCE_MS: int = 800  # minimum ms between triggers
-    # Other-party (system audio) speech: answer every utterance as soon as it ends, not
-    # only detected questions, and let it pre-empt an in-flight answer.
+    # Other-party (system audio / O) speech only: answer every utterance as soon as it
+    # ends (not mic / Y). Does not cancel an already-streaming speaker answer.
     LIVE_SPEAKER_ANSWER_ALL: bool = True
-    LIVE_SPEAKER_MIN_WORDS: int = 3
-    # Force Deepgram to finalize speaker speech after this much audio silence/idle
-    # (system audio often stops sending packets entirely, so endpointing never fires).
-    LIVE_SPEAKER_IDLE_FINALIZE_SECONDS: float = 0.6
+    LIVE_SPEAKER_MIN_WORDS: int = 4
+    # Wait this long with no other-party voice before finalizing the utterance and
+    # auto-answering (live suggestion). ~2.5s is quick after the interviewer stops,
+    # without firing on a short mid-sentence pause.
+    LIVE_SPEAKER_IDLE_FINALIZE_SECONDS: float = 2.5
+    # Deepgram endpointing for the speaker (system-audio) stream only. Mic keeps the
+    # client-supplied endpointing_ms. Must be >= idle finalize so speech_final aligns.
+    LIVE_SPEAKER_ENDPOINTING_MS: int = 2500
     
     # Storage
     SQLITE_DB_PATH: str = "./data/snapeye.db"

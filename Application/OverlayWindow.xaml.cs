@@ -51,8 +51,13 @@ namespace SnapEye
         // Microphone mute: when true, captured mic audio is NOT sent to the backend
         // (the backend keepalive keeps the mic stream open so unmute is instant).
         // Toggled by MicMuteBtn or the global Backtick+Space hook.
-        private bool micMuted;
+        // Default comes from AppConfig.MicMutedByDefault (audio.mic_muted_by_default).
+        private bool micMuted = AppConfig.MicMutedByDefault;
+        // Suppresses the mute toast while applying the startup default.
+        private bool micMuteNotifyReady;
         private LowLevelKeyboardHook? micMuteHook;
+        /// <summary>Left Ctrl + Right Ctrl → "What should I say?" (RegisterHotKey cannot bind both).</summary>
+        private LowLevelKeyboardHook? whatShouldISayHook;
         private WheelCaptureHook? wheelHook;
 
         /// <summary>Pixels per press/repeat for Ctrl+Alt+Arrow overlay nudge (RegisterHotKey only; no LL hook).</summary>
@@ -352,6 +357,37 @@ namespace SnapEye
                 Console.WriteLine($"[Hotkey] Mic mute hook error: {ex.Message}");
             }
 
+            // Both Ctrl keys (left + right) fire "What should I say?" globally.
+            try
+            {
+                whatShouldISayHook = new LowLevelKeyboardHook(
+                    requireControl: false,
+                    new[] { LowLevelKeyboardHook.VK_LCONTROL },
+                    new[] { LowLevelKeyboardHook.VK_RCONTROL });
+                whatShouldISayHook.ChordPressed += (s, _) => TriggerWhatShouldISay();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Hotkey] What-should-I-say hook error: {ex.Message}");
+            }
+
+            // Apply default mute without the "muted" toast; user toggles notify after this.
+            try
+            {
+                if (MicMuteBtn != null)
+                {
+                    MicMuteBtn.IsChecked = AppConfig.MicMutedByDefault;
+                    micMuted = AppConfig.MicMutedByDefault;
+                    MicMuteBtn.ToolTip = micMuted
+                        ? "Microphone muted — click or press ` + Space to unmute"
+                        : "Mute microphone (` + Space)";
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] Default mic mute apply error: {ex.Message}");
+            }
+            micMuteNotifyReady = true;
         }
 
         /// <summary>Screen-pixel rectangle of the Island Bar button (the click-through carve-out).</summary>
@@ -493,6 +529,8 @@ namespace SnapEye
                 MicMuteBtn.ToolTip = micMuted
                     ? "Microphone muted — click or press ` + Space to unmute"
                     : "Mute microphone (` + Space)";
+                if (!micMuteNotifyReady)
+                    return;
                 if (micMuted)
                     ShowInlineError("Microphone muted — your voice isn't being transcribed.");
                 else
@@ -1348,11 +1386,13 @@ namespace SnapEye
         {
             try
             {
+                // Prefer mode name so the backend can detect "Behavioral Interview Questions"
+                // (ids are often GUIDs that do not contain "interview" / "behavio").
                 _ = transcriptionService.SendInterviewContextAsync(
                     "",
                     "",
                     "",
-                    GetCurrentModeId(),
+                    GetCurrentModeLabel(),
                     GetCurrentModeSystemPrompt());
             }
             catch (Exception ex)
@@ -1415,6 +1455,45 @@ namespace SnapEye
         }
 
         /// <summary>
+        /// Same as clicking "What should I say?" — used by Left Ctrl + Right Ctrl.
+        /// Safe to call from the keyboard-hook thread.
+        /// </summary>
+        public void TriggerWhatShouldISay()
+        {
+            try
+            {
+                Dispatcher.BeginInvoke(new Action(async () =>
+                {
+                    try
+                    {
+                        if (IsResponseStreaming)
+                            return;
+
+                        var action = AppConfig.QuickActions.FirstOrDefault(a =>
+                            a.Label != null
+                            && a.Label.IndexOf("What should I say", StringComparison.OrdinalIgnoreCase) >= 0);
+                        if (action == null)
+                        {
+                            ShowInlineError("No \"What should I say?\" quick action is configured.");
+                            return;
+                        }
+
+                        ExpandSessionIfCollapsed();
+                        await RunContextualPromptAsync(action.Label, action.Prompt);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[UI] What-should-I-say trigger error: {ex.Message}");
+                    }
+                }));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UI] What-should-I-say dispatch error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// "Explain more": expands the most recent AI answer into a 1-2 minute read. The
         /// previous answer is quoted in the prompt so the model expands exactly that text,
         /// and the request is sent without the quick-action length cap.
@@ -1471,7 +1550,7 @@ namespace SnapEye
                 jobDescription: "",
                 company: "",
                 role: "",
-                mode: GetCurrentModeId(),
+                mode: GetCurrentModeLabel(),
                 history: history.GetRecentDialogue(),
                 quickAction: !expand,
                 expand: expand);
@@ -2056,7 +2135,7 @@ namespace SnapEye
                 jobDescription: "",
                 company: "",
                 role: "",
-                mode: GetCurrentModeId(),
+                mode: GetCurrentModeLabel(),
                 history: history.GetRecentDialogue());
         }
 
@@ -2065,6 +2144,20 @@ namespace SnapEye
             if (selectedModeIndex >= 0 && selectedModeIndex < AppConfig.Modes.Count)
                 return AppConfig.Modes[selectedModeIndex].Id ?? "";
             return "";
+        }
+
+        /// <summary>Mode name plus id for backend routing (behavioral length rules, interview
+        /// grounding). Name is required because custom modes often use opaque GUID ids.</summary>
+        private string GetCurrentModeLabel()
+        {
+            if (selectedModeIndex < 0 || selectedModeIndex >= AppConfig.Modes.Count)
+                return "";
+            var m = AppConfig.Modes[selectedModeIndex];
+            string name = m.Name ?? "";
+            string id = m.Id ?? "";
+            if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(id))
+                return $"{name}|{id}";
+            return !string.IsNullOrWhiteSpace(name) ? name : id;
         }
 
         /// <summary>Raw template text of the currently-selected mode (no appended suffix),
@@ -2076,8 +2169,12 @@ namespace SnapEye
             return "";
         }
 
-        private bool IsInterviewMode() =>
-            GetCurrentModeId().IndexOf("interview", StringComparison.OrdinalIgnoreCase) >= 0;
+        private bool IsInterviewMode()
+        {
+            string label = GetCurrentModeLabel();
+            return label.IndexOf("interview", StringComparison.OrdinalIgnoreCase) >= 0
+                || label.IndexOf("behavio", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
 
         private string GetCurrentSystemPrompt()
         {
@@ -2586,10 +2683,15 @@ namespace SnapEye
         {
             try
             {
-                // Drop mic audio while muted; the backend keepalive keeps the mic
-                // stream open so toggling back on resumes transcription immediately.
-                if (IsListening && transcriptionService.IsConnected && !micMuted)
-                    await transcriptionService.SendAudioAsync(e.AudioData, MessageSource.Microphone);
+                // Drop mic while user-muted, or while system audio (Other / O) is playing —
+                // otherwise speakers leak into the mic and get transcribed as "You", and can
+                // confuse live answers. Backend KeepAlive keeps the mic Deepgram stream open.
+                if (!IsListening || !transcriptionService.IsConnected || micMuted)
+                    return;
+                if (speakerCaptureService.IsSystemAudioActive())
+                    return;
+
+                await transcriptionService.SendAudioAsync(e.AudioData, MessageSource.Microphone);
             }
             catch (Exception ex)
             {
@@ -2601,6 +2703,8 @@ namespace SnapEye
         {
             try
             {
+                // Other / system audio only — this stream drives live auto-answers after
+                // ~2.5s silence when the utterance has >= 4 words (backend).
                 if (IsListening && transcriptionService.IsConnected)
                     await transcriptionService.SendAudioAsync(e.AudioData, MessageSource.Speaker);
             }
@@ -2785,6 +2889,9 @@ namespace SnapEye
                 // Remove the global Backtick+Space keyboard hook.
                 try { micMuteHook?.Dispose(); } catch { }
                 micMuteHook = null;
+
+                try { whatShouldISayHook?.Dispose(); } catch { }
+                whatShouldISayHook = null;
 
                 // Remove the global mouse-wheel hook.
                 try { wheelHook?.Dispose(); } catch { }

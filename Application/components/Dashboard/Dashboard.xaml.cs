@@ -1,11 +1,14 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using Microsoft.Win32;
 using SnapEye.Models;
 using SnapEye.Services;
 using static SnapEye.Services.SessionManager;
@@ -949,9 +952,35 @@ namespace SnapEye.Dashboard
                 FontFamily = new FontFamily("Segoe UI"),
             };
 
-            var panel = new StackPanel();
-            panel.Children.Add(titleBlock);
-            panel.Children.Add(metaBlock);
+            var textPanel = new StackPanel();
+            textPanel.Children.Add(titleBlock);
+            textPanel.Children.Add(metaBlock);
+
+            var exportBtn = new Button
+            {
+                Content = "Export",
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(Color.FromRgb(0x25, 0x63, 0xEB)),
+                Background = new SolidColorBrush(Colors.White),
+                BorderBrush = new SolidColorBrush(Color.FromRgb(0xC5, 0xDF, 0xF8)),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(8, 4, 8, 4),
+                Margin = new Thickness(8, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Cursor = Cursors.Hand,
+                ToolTip = "Save this conversation as a .txt file",
+                Tag = s,
+            };
+            exportBtn.Click += ExportConversation_Click;
+
+            var rowGrid = new Grid();
+            rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            Grid.SetColumn(textPanel, 0);
+            Grid.SetColumn(exportBtn, 1);
+            rowGrid.Children.Add(textPanel);
+            rowGrid.Children.Add(exportBtn);
 
             var row = new Border
             {
@@ -960,7 +989,7 @@ namespace SnapEye.Dashboard
                 CornerRadius = new CornerRadius(8),
                 Margin = new Thickness(4, 2, 4, 2),
                 Cursor = Cursors.Hand,
-                Child = panel,
+                Child = rowGrid,
                 Tag = s,
             };
 
@@ -997,6 +1026,8 @@ namespace SnapEye.Dashboard
             DetailTitle.Text = "Select a conversation";
             DetailMeta.Text = "";
             DetailThread.Children.Clear();
+            if (ExportConversationBtn != null)
+                ExportConversationBtn.IsEnabled = false;
         }
 
         private void RenderDetail(ConversationSession s)
@@ -1010,11 +1041,101 @@ namespace SnapEye.Dashboard
                 : "in progress";
             DetailMeta.Text = $"{s.StartedAt:dddd, MMM d · h:mm tt} · {count} message{(count == 1 ? "" : "s")} · {duration}";
 
+            if (ExportConversationBtn != null)
+                ExportConversationBtn.IsEnabled = true;
+
             DetailThread.Children.Clear();
             if (s.Messages == null) return;
 
             foreach (var m in s.Messages)
                 DetailThread.Children.Add(BuildMessageBubble(m));
+        }
+
+        /// <summary>
+        /// Save a conversation as UTF-8 .txt via SaveFileDialog. Used by each list-row
+        /// Export button and the detail-header Export .txt button.
+        /// </summary>
+        private void ExportConversation_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                e.Handled = true;
+
+                ConversationSession? session = null;
+                if (sender is Button btn && btn.Tag is ConversationSession fromTag)
+                    session = fromTag;
+                else
+                    session = selectedConversation;
+
+                if (session == null)
+                {
+                    MessageBox.Show(
+                        "Select a conversation first.",
+                        "Export",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                    return;
+                }
+
+                if (session.Messages == null || session.Messages.Count == 0)
+                {
+                    MessageBox.Show(
+                        "This conversation has no messages to export.",
+                        "Export",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                    return;
+                }
+
+                string title = !string.IsNullOrWhiteSpace(session.Title)
+                    ? session.Title!
+                    : ConversationTitleService.Fallback(session);
+                string safeName = SanitizeFileName(title);
+                if (string.IsNullOrWhiteSpace(safeName))
+                    safeName = $"SnapEye-{session.StartedAt:yyyyMMdd-HHmm}";
+
+                var dlg = new SaveFileDialog
+                {
+                    Title = "Export conversation",
+                    Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*",
+                    DefaultExt = ".txt",
+                    AddExtension = true,
+                    FileName = safeName + ".txt",
+                    OverwritePrompt = true,
+                };
+
+                if (dlg.ShowDialog(this) != true)
+                    return;
+
+                File.WriteAllText(dlg.FileName, session.FormatAsPlainText(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Dashboard] Export conversation error: {ex.Message}");
+                MessageBox.Show(
+                    "Could not export the conversation:\n" + ex.Message,
+                    "Export",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
+        }
+
+        private static string SanitizeFileName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return "";
+            var invalid = Path.GetInvalidFileNameChars();
+            var sb = new StringBuilder(name.Length);
+            foreach (char c in name.Trim())
+            {
+                if (invalid.Contains(c) || c < 32)
+                    sb.Append('-');
+                else
+                    sb.Append(c);
+            }
+            string cleaned = sb.ToString().Trim(' ', '.', '-');
+            if (cleaned.Length > 80)
+                cleaned = cleaned.Substring(0, 80).TrimEnd(' ', '-', '.');
+            return cleaned;
         }
 
         private static UIElement BuildMessageBubble(ConversationMessage m)

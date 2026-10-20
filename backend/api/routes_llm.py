@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from config import settings
 from security import auth_handler
-from services.context_service import mode_prompt_with_grounding
+from services.context_service import is_behavioral_mode, mode_prompt_with_grounding
 from services.llm_router import (
     llm_router,
     LLMMessage,
@@ -190,7 +190,11 @@ async def context_stream_llm(
     user_data=Depends(auth_handler.verify_auth),
 ):
     """Stream a context-aware LLM response grounded in the user's saved experience."""
-    is_interview = bool(request.job_description) or "interview" in (request.mode or "").lower()
+    is_interview = (
+        bool(request.job_description)
+        or "interview" in (request.mode or "").lower()
+        or is_behavioral_mode(request.mode or "", request.system_prompt or "")
+    )
 
     # Retrieve the user's most relevant experience (and knowledge base) in real time.
     # Bounded so a slow vector store never stalls the answer.
@@ -407,6 +411,10 @@ def _build_assistant_system_prompt(
     if mode_prompt and mode_prompt.strip():
         return mode_prompt_with_grounding(mode_prompt)
 
+    default_cap = (
+        "~300 words" if is_behavioral_mode(mode_prompt=mode_prompt)
+        else "~220 words"
+    )
     base = (
         "You are SnapEye, a real-time assistant that speaks AS the user (first person, \"I\"). "
         "You HAVE access to the conversation transcript and the user's real background provided "
@@ -431,7 +439,7 @@ def _build_assistant_system_prompt(
         + (
             "- Keep responses under 70 words.\n" if quick_action
             else "- Aim for 250-400 words (a 1-2 minute read).\n" if expand
-            else "- Keep responses under ~220 words.\n"
+            else f"- Keep responses under {default_cap}.\n"
         )
         + "- Use light markdown (**bold**, short paragraphs). No large headings (## or #)."
     )

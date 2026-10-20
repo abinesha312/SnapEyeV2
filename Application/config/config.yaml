@@ -23,6 +23,8 @@ audio:
   sample_rate: 24000
   channels: 1
   encoding: "pcm16"
+  # Start with mic muted; unmute via the toolbar button or ` + Space.
+  mic_muted_by_default: true
 
 transcription:
   model: "nova-3"

@@ -525,10 +525,26 @@
                                             </Grid.RowDefinitions>
 
                                             <Border Grid.Row="0" Background="#F2F8FC" BorderBrush="#E6E3EF" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0" Padding="16,12">
-                                                <StackPanel>
-                                                    <TextBlock x:Name="DetailTitle" Text="Select a conversation" FontSize="15" FontWeight="SemiBold" Foreground="#333333" TextWrapping="Wrap"/>
-                                                    <TextBlock x:Name="DetailMeta" Text="" FontSize="11" Foreground="#8A8394" Margin="0,2,0,0"/>
-                                                </StackPanel>
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel Grid.Column="0" Margin="0,0,12,0">
+                                                        <TextBlock x:Name="DetailTitle" Text="Select a conversation" FontSize="15" FontWeight="SemiBold" Foreground="#333333" TextWrapping="Wrap"/>
+                                                        <TextBlock x:Name="DetailMeta" Text="" FontSize="11" Foreground="#8A8394" Margin="0,2,0,0"/>
+                                                    </StackPanel>
+                                                    <Button Grid.Column="1" x:Name="ExportConversationBtn"
+                                                            Content="Export .txt"
+                                                            Height="32" Padding="12,0"
+                                                            VerticalAlignment="Center"
+                                                            Cursor="Hand"
+                                                            IsEnabled="False"
+                                                            Click="ExportConversation_Click"
+                                                            ToolTip="Save this conversation as a text file"
+                                                            Background="#FFFFFF" BorderBrush="#C5DFF8" BorderThickness="1"
+                                                            Foreground="#2563EB" FontSize="12" FontWeight="SemiBold"/>
+                                                </Grid>
                                             </Border>
 
                                             <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="14,12">

@@ -1,4 +1,5 @@
 using System;
+using System.Text;
 
 namespace SnapEye.Models
 {
@@ -43,5 +44,42 @@ namespace SnapEye.Models
         public string? ConversationId { get; set; }
 
         public System.Collections.Generic.List<ConversationMessage> Messages { get; set; } = new();
+
+        /// <summary>
+        /// Full conversation as plain text for export (.txt). Includes title header and
+        /// every message with role + local timestamp — no length cap.
+        /// </summary>
+        public string FormatAsPlainText()
+        {
+            var sb = new StringBuilder();
+            string title = !string.IsNullOrWhiteSpace(Title) ? Title!.Trim() : $"Conversation {StartedAt:yyyy-MM-dd HH:mm}";
+            sb.AppendLine(title);
+            sb.AppendLine($"Started: {StartedAt:yyyy-MM-dd HH:mm:ss}");
+            if (EndedAt.HasValue)
+                sb.AppendLine($"Ended:   {EndedAt.Value:yyyy-MM-dd HH:mm:ss}");
+            sb.AppendLine(new string('-', 48));
+            sb.AppendLine();
+
+            foreach (var m in Messages)
+            {
+                if (string.IsNullOrWhiteSpace(m.Text)) continue;
+                string who = m.Kind switch
+                {
+                    ConversationMessageKind.UserTyped => "You",
+                    ConversationMessageKind.UserSpoken => "You",
+                    ConversationMessageKind.OtherSpoken => "Other",
+                    ConversationMessageKind.AssistantAnswer => "Assistant",
+                    ConversationMessageKind.QuickAction => string.IsNullOrWhiteSpace(m.Label)
+                        ? "You"
+                        : $"You ({m.Label})",
+                    _ => "You",
+                };
+                sb.AppendLine($"[{m.Timestamp:HH:mm:ss}] {who}:");
+                sb.AppendLine(m.Text.Trim());
+                sb.AppendLine();
+            }
+
+            return sb.ToString().TrimEnd() + Environment.NewLine;
+        }
     }
 }

@@ -33,6 +33,8 @@ namespace SnapEye.Config
         public static int AudioBufferSize { get; set; } = 4096;
         public static int AudioSampleRate { get; set; } = 24000;
         public static int AudioChannels { get; set; } = 1;
+        /// <summary>When true, the overlay starts with the microphone muted.</summary>
+        public static bool MicMutedByDefault { get; set; } = true;
 
         // === Transcription ===
         public static string DeepgramModel { get; set; } = "nova-3";
@@ -188,6 +190,7 @@ namespace SnapEye.Config
                 AudioBufferSize = GetInt(audio, "buffer_size", AudioBufferSize);
                 AudioSampleRate = GetInt(audio, "sample_rate", AudioSampleRate);
                 AudioChannels = GetInt(audio, "channels", AudioChannels);
+                MicMutedByDefault = GetBool(audio, "mic_muted_by_default", MicMutedByDefault);
             }
 
             // Transcription

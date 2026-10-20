@@ -13,9 +13,15 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
-def mode_prompt_with_grounding(mode_prompt: str) -> str:
+def is_behavioral_mode(mode: str = "", mode_prompt: str = "") -> bool:
+    """True when the active mode is a behavioral / STAR interview mode."""
+    blob = f"{mode or ''}\n{mode_prompt or ''}".lower()
+    return "behavio" in blob  # behavioral / behaviour
+
+
+def mode_prompt_with_grounding(mode_prompt: str, mode: str = "") -> str:
     """The user's mode prompt governs format, length and tone; only grounding facts are added."""
-    return (
+    text = (
         "ACTIVE MODE (follow these instructions strictly - they override any other style, "
         "format or length preference):\n"
         f"{mode_prompt.strip()}\n\n"
@@ -28,6 +34,15 @@ def mode_prompt_with_grounding(mode_prompt: str) -> str:
         "- Put code, ASCII diagrams, and anything that depends on alignment inside ``` fenced "
         "code blocks."
     )
+    # Behavioral STAR answers need room for a full Situation → Result; the default ~220
+    # word habit was cutting the ending. Allow up to ~300 words for this mode only.
+    if is_behavioral_mode(mode, mode_prompt):
+        text += (
+            "\n\nLENGTH (behavioral STAR only): You may use up to ~300 words so Situation, "
+            "Task, Action, and Result are each complete. Do not truncate mid-sentence or skip "
+            "the Result / closing hook. Prefer a full spoken STAR answer over cutting short."
+        )
+    return text
 
 
 @dataclass
@@ -130,7 +145,12 @@ class ContextManager:
 
     @property
     def is_interview(self) -> bool:
-        return "interview" in (self._mode or "").lower() or bool(self._job_description)
+        mode_l = (self._mode or "").lower()
+        return (
+            "interview" in mode_l
+            or is_behavioral_mode(self._mode, self._mode_system_prompt)
+            or bool(self._job_description)
+        )
 
     @property
     def job_description(self) -> str:
@@ -297,8 +317,14 @@ class ContextManager:
         When the user selected a mode, its prompt replaces these style rules entirely.
         """
         if self._mode_system_prompt.strip():
-            return mode_prompt_with_grounding(self._mode_system_prompt)
+            return mode_prompt_with_grounding(
+                self._mode_system_prompt, mode=self._mode
+            )
 
+        word_cap = (
+            "~300 words" if is_behavioral_mode(self._mode, self._mode_system_prompt)
+            else "~220 words"
+        )
         base = (
             "You are SnapEye, a real-time assistant that speaks AS the user (first person, \"I\"). "
             "You DO have access to the live conversation transcript and the user's real background "
@@ -311,7 +337,7 @@ class ContextManager:
             "- Share the human side: what was hard, what you learned, how it felt to solve it.\n"
             "- Close with the outcome and the value it added to the business or organization.\n"
             "Sound natural, warm, and confident — connected and reflective, never a robotic list. "
-            "Keep it tight (under ~220 words) and use light markdown (**bold**, short paragraphs), "
+            f"Keep it tight (under {word_cap}) and use light markdown (**bold**, short paragraphs), "
             "no large headings.\n"
             "STRICT RULES:\n"
             "- Answer the detected question directly and stay strictly on-topic — no filler, no "
