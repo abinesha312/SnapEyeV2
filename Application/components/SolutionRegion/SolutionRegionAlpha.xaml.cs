@@ -472,9 +472,9 @@ namespace SnapEye.SolutionRegion
                 Background = Brushes.Transparent,
                 Foreground = new SolidColorBrush(BubbleTextColor),
                 Pipeline = MarkdownRendering.Pipeline,
-                Markdown = MarkdownRendering.Prepare(markdown)
             };
             ApplyMarkdownTheme(viewer);
+            viewer.Markdown = MarkdownRendering.Prepare(markdown);
 
             var accent = new Border
             {
@@ -549,6 +549,10 @@ namespace SnapEye.SolutionRegion
 
         private static Style? _codeBlockStyle;
         private static Style? _inlineCodeStyle;
+        private static Style? _tableStyle;
+        private static Style? _tableCellStyle;
+        private static Style? _tableHeaderStyle;
+        private static Style? _heading2Style;
 
         private static void ApplyMarkdownTheme(MarkdownViewer viewer)
         {
@@ -578,9 +582,54 @@ namespace SnapEye.SolutionRegion
                     s.Seal();
                     _inlineCodeStyle = s;
                 }
+                if (_tableStyle == null)
+                {
+                    var s = new Style(typeof(Table));
+                    s.Setters.Add(new Setter(Block.BorderBrushProperty, Brushes.White));
+                    s.Setters.Add(new Setter(Block.BorderThicknessProperty, new Thickness(1)));
+                    s.Setters.Add(new Setter(Table.CellSpacingProperty, 0.0));
+                    s.Setters.Add(new Setter(TextElement.ForegroundProperty, Brushes.White));
+                    s.Seal();
+                    _tableStyle = s;
+                }
+                if (_tableCellStyle == null)
+                {
+                    var s = new Style(typeof(TableCell));
+                    s.Setters.Add(new Setter(Block.BorderBrushProperty, Brushes.White));
+                    s.Setters.Add(new Setter(Block.BorderThicknessProperty, new Thickness(1)));
+                    s.Setters.Add(new Setter(TableCell.PaddingProperty, new Thickness(8, 6, 8, 6)));
+                    s.Setters.Add(new Setter(TextElement.ForegroundProperty, new SolidColorBrush(Color.FromRgb(0xE5, 0xE7, 0xEB))));
+                    s.Seal();
+                    _tableCellStyle = s;
+                }
+                if (_tableHeaderStyle == null)
+                {
+                    var s = new Style(typeof(TableRow));
+                    s.Setters.Add(new Setter(TextElement.FontWeightProperty, FontWeights.SemiBold));
+                    s.Setters.Add(new Setter(TextElement.ForegroundProperty, Brushes.White));
+                    s.Setters.Add(new Setter(TextElement.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0x1E, 0x29, 0x3B))));
+                    s.Seal();
+                    _tableHeaderStyle = s;
+                }
+                if (_heading2Style == null)
+                {
+                    var s = new Style(typeof(Paragraph));
+                    s.Setters.Add(new Setter(TextElement.FontSizeProperty, 18.0));
+                    s.Setters.Add(new Setter(TextElement.FontWeightProperty, FontWeights.SemiBold));
+                    s.Setters.Add(new Setter(TextElement.ForegroundProperty, Brushes.White));
+                    s.Setters.Add(new Setter(Block.MarginProperty, new Thickness(0, 10, 0, 6)));
+                    s.Seal();
+                    _heading2Style = s;
+                }
 
                 viewer.Resources[Styles.CodeBlockStyleKey] = _codeBlockStyle;
                 viewer.Resources[Styles.CodeStyleKey] = _inlineCodeStyle;
+                viewer.Resources[Styles.TableStyleKey] = _tableStyle;
+                viewer.Resources[Styles.TableCellStyleKey] = _tableCellStyle;
+                viewer.Resources[Styles.TableHeaderStyleKey] = _tableHeaderStyle;
+                viewer.Resources[Styles.Heading2StyleKey] = _heading2Style;
+                viewer.Resources[Styles.Heading1StyleKey] = _heading2Style;
+                viewer.Resources[Styles.Heading3StyleKey] = _heading2Style;
             }
             catch (Exception ex)
             {
@@ -1034,10 +1083,10 @@ namespace SnapEye.SolutionRegion
                 Background = Brushes.Transparent,
                 Foreground = new SolidColorBrush(BubbleTextColor),
                 Pipeline = MarkdownRendering.Pipeline,
-                Markdown = MarkdownRendering.Prepare(markdown),
                 MaxWidth = bubbleMaxWidth,
             };
             ApplyMarkdownTheme(viewer);
+            viewer.Markdown = MarkdownRendering.Prepare(markdown);
             return viewer;
         }
 
@@ -1328,13 +1377,11 @@ namespace SnapEye.SolutionRegion
             bool shift = (Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift;
             if (shift)
             {
-                var codeScroll = FindTaggedScrollViewer(
-                    e.OriginalSource as DependencyObject,
-                    NonWrappingCodeBlockRenderer.CodeBlockScrollTag);
-                if (codeScroll != null && codeScroll.ScrollableWidth > 0)
+                var hScroll = FindInlineHScrollViewer(e.OriginalSource as DependencyObject);
+                if (hScroll != null && hScroll.ScrollableWidth > 0)
                 {
-                    codeScroll.ScrollToHorizontalOffset(
-                        Math.Max(0, Math.Min(codeScroll.ScrollableWidth, codeScroll.HorizontalOffset + step)));
+                    hScroll.ScrollToHorizontalOffset(
+                        Math.Max(0, Math.Min(hScroll.ScrollableWidth, hScroll.HorizontalOffset + step)));
                     e.Handled = true;
                     return;
                 }
@@ -1348,12 +1395,34 @@ namespace SnapEye.SolutionRegion
 
         private static ScrollViewer? FindTaggedScrollViewer(DependencyObject? start, string tag)
         {
-            for (DependencyObject? d = start; d != null; d = VisualTreeHelper.GetParent(d))
+            for (DependencyObject? d = start; d != null; d = GetParentSafe(d))
             {
                 if (d is ScrollViewer sc && Equals(sc.Tag, tag))
                     return sc;
             }
             return null;
+        }
+
+        private static ScrollViewer? FindInlineHScrollViewer(DependencyObject? start)
+        {
+            return FindTaggedScrollViewer(start, NonWrappingCodeBlockRenderer.CodeBlockScrollTag)
+                   ?? FindTaggedScrollViewer(start, TableColumnFitter.TableScrollTag);
+        }
+
+        private static DependencyObject? GetParentSafe(DependencyObject current)
+        {
+            try
+            {
+                if (current is Visual or System.Windows.Media.Media3D.Visual3D)
+                    return VisualTreeHelper.GetParent(current);
+                if (current is FrameworkContentElement content)
+                    return content.Parent ?? content.TemplatedParent;
+                return LogicalTreeHelper.GetParent(current);
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         /// <summary>
@@ -1382,20 +1451,18 @@ namespace SnapEye.SolutionRegion
                     return false;
 
                 var hit = VisualTreeHelper.HitTest(this, local);
-                var codeScroll = FindTaggedScrollViewer(
-                    hit?.VisualHit,
-                    NonWrappingCodeBlockRenderer.CodeBlockScrollTag);
-                if (codeScroll == null || codeScroll.ScrollableWidth <= 0)
+                var hScroll = FindInlineHScrollViewer(hit?.VisualHit);
+                if (hScroll == null || hScroll.ScrollableWidth <= 0)
                     return false;
 
                 double step = -wheelDelta / 120.0 * 48.0;
-                codeScroll.ScrollToHorizontalOffset(
-                    Math.Max(0, Math.Min(codeScroll.ScrollableWidth, codeScroll.HorizontalOffset + step)));
+                hScroll.ScrollToHorizontalOffset(
+                    Math.Max(0, Math.Min(hScroll.ScrollableWidth, hScroll.HorizontalOffset + step)));
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SolutionRegion] Code H-scroll error: {ex.Message}");
+                Console.WriteLine($"[SolutionRegion] Inline H-scroll error: {ex.Message}");
                 return false;
             }
         }

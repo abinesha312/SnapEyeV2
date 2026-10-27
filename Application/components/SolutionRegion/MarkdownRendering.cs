@@ -14,22 +14,27 @@ namespace SnapEye.SolutionRegion
     internal static class MarkdownRendering
     {
         /// <summary>
-        /// Supported Markdig.Wpf extensions plus single newlines rendered as line breaks;
-        /// plain CommonMark joins them with a space, flattening multi-line text into one line.
+        /// Supported Markdig.Wpf extensions. Soft breaks stay soft so paragraphs and
+        /// GFM tables keep normal structure; ASCII diagrams are fenced in <see cref="Prepare"/>.
         /// </summary>
         public static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()
             .UseSupportedExtensions()
-            .UseSoftlineBreakAsHardlineBreak()
             .Build();
 
         // Box corners/edges ("+-----+", "|----->"), Unicode box drawing, or arrow connectors.
         // Includes single-dash arrows ("->", "<-") common in system-design sketches.
+        // NOTE: do NOT treat bare "|---|" table separators as diagram anchors — that was
+        // fencing real markdown tables into code blocks.
         private static readonly Regex DiagramAnchor = new(
-            @"\+[-=]{2,}|[-=]{2,}\+|[│┃┌┐└┘├┤┬┴┼─━╔╗╚╝║═]|[-=]+>|<[-=]+|\|[-=]{3,}|\[[^\]]+\]\s*-+>",
+            @"\+[-=]{2,}|[-=]{2,}\+|[│┃┌┐└┘├┤┬┴┼─━╔╗╚╝║═]|[-=]{2,}>|<[-=]{2,}|\[[^\]]+\]\s*-+>",
             RegexOptions.Compiled);
 
         private static readonly Regex TableSeparator = new(
             @"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$",
+            RegexOptions.Compiled);
+
+        private static readonly Regex TableRow = new(
+            @"^\s*\|.*\|\s*$",
             RegexOptions.Compiled);
 
         private static readonly Regex Fence = new(@"^\s{0,3}(```|~~~)", RegexOptions.Compiled);
@@ -89,9 +94,12 @@ namespace SnapEye.SolutionRegion
 
                 var block = lines.Skip(i).Take(end - i + 1).ToList();
                 bool hasAnchor = block.Any(l => DiagramAnchor.IsMatch(l));
+                // Pipe tables look a lot like box drawings — never fence them as code.
+                bool looksLikeMarkdownTable = block.Count(IsMarkdownTableLine) >= 2
+                    && block.Any(TableSeparator.IsMatch);
                 bool alreadyIndentedCode = i > 0 && string.IsNullOrWhiteSpace(lines[i - 1])
                     && block.All(l => l.StartsWith("    ") || l.StartsWith("\t") || string.IsNullOrWhiteSpace(l));
-                if (block.Count < 2 || !hasAnchor || alreadyIndentedCode)
+                if (block.Count < 2 || !hasAnchor || alreadyIndentedCode || looksLikeMarkdownTable)
                 {
                     output.AddRange(block);
                     i = end + 1;
@@ -112,15 +120,26 @@ namespace SnapEye.SolutionRegion
             return string.Join("\n", output);
         }
 
+        private static bool IsMarkdownTableLine(string line)
+        {
+            if (string.IsNullOrWhiteSpace(line)) return false;
+            if (TableSeparator.IsMatch(line) || TableRow.IsMatch(line)) return true;
+            // GFM row without leading pipe: "col a | col b | col c"
+            string t = line.Trim();
+            int pipes = t.Count(c => c == '|');
+            return pipes >= 2 && !t.StartsWith("```", StringComparison.Ordinal);
+        }
+
         private static bool IsDiagramLine(string line)
         {
-            if (string.IsNullOrWhiteSpace(line) || TableSeparator.IsMatch(line)) return false;
+            // Never treat GFM table rows / separators as diagram lines.
+            if (string.IsNullOrWhiteSpace(line) || IsMarkdownTableLine(line)) return false;
             if (DiagramAnchor.IsMatch(line)) return true;
             string t = line.Trim();
-            // Box body rows ("| - id      |"); padded table rows also match, but a block is
-            // only fenced when it contains a box corner or connector.
+            // Box body rows with heavy padding (not markdown tables).
             int pipes = t.Count(c => c == '|');
-            if (pipes >= 2 && Regex.IsMatch(line, @"\|\s{2,}|\s{2,}\|")) return true;
+            if (pipes >= 2 && Regex.IsMatch(line, @"\|\s{2,}|\s{2,}\|") && !TableRow.IsMatch(line))
+                return true;
             // Connector rows between boxes: "^", "|", "| 1      v", "1..*".
             return Regex.IsMatch(t, @"^[|^vV<>*.\d:/\\\s-]+$") && Regex.IsMatch(t, @"[|^vV]");
         }
