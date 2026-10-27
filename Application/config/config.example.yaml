@@ -15,7 +15,7 @@ audio:
   buffer_size: 4096
   sample_rate: 24000
   channels: 1
-  mic_muted_by_default: true
+  mic_muted_by_default: false
 
 transcription:
   model: "nova-3"

@@ -34,6 +34,11 @@ namespace SnapEye.Services
         private const uint SWP_NOACTIVATE = 0x0010;
         private const uint GA_ROOT = 2;
 
+        private const int SM_XVIRTUALSCREEN = 76;
+        private const int SM_YVIRTUALSCREEN = 77;
+        private const int SM_CXVIRTUALSCREEN = 78;
+        private const int SM_CYVIRTUALSCREEN = 79;
+
         private const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
         private const uint WINEVENT_OUTOFCONTEXT = 0x0000;
 
@@ -101,6 +106,9 @@ namespace SnapEye.Services
 
         [DllImport("user32.dll")]
         private static extern bool GetCursorPos(out POINT lpPoint);
+
+        [DllImport("user32.dll")]
+        private static extern int GetSystemMetrics(int nIndex);
 
         [DllImport("user32.dll")]
         private static extern IntPtr SetWinEventHook(
@@ -736,6 +744,52 @@ namespace SnapEye.Services
             catch
             {
                 /* ignore */
+            }
+        }
+
+        /// <summary>
+        /// Nudge a no-activate overlay in physical screen pixels. Uses Win32 virtual-screen
+        /// metrics (not <see cref="SystemParameters"/>) so PerMonitorV2 DPI cannot clamp the
+        /// window halfway across the display. Only a thin strip must stay on-screen so the
+        /// overlay can be parked against the right/left edge.
+        /// </summary>
+        public static void Nudge(Window window, int dxPx, int dyPx, int minVisiblePx = 96)
+        {
+            if (window == null) return;
+            try
+            {
+                var hwnd = new WindowInteropHelper(window).Handle;
+                if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return;
+                if (!GetWindowRect(hwnd, out RECT rect)) return;
+
+                int w = Math.Max(1, rect.Right - rect.Left);
+                int h = Math.Max(1, rect.Bottom - rect.Top);
+                int x = rect.Left + dxPx;
+                int y = rect.Top + dyPx;
+
+                int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+                int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+                int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+                int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+                if (vw <= 0 || vh <= 0) return;
+
+                int minVisX = Math.Clamp(minVisiblePx, 32, w);
+                int minVisY = Math.Clamp(minVisiblePx, 32, h);
+                // Allow the window to hang mostly off-screen; keep a usable grab strip.
+                int minX = vx + minVisX - w;
+                int maxX = vx + vw - minVisX;
+                int minY = vy + minVisY - h;
+                int maxY = vy + vh - minVisY;
+
+                x = Math.Max(minX, Math.Min(x, maxX));
+                y = Math.Max(minY, Math.Min(y, maxY));
+
+                SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                SyncDipPosition(window, x, y);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[NoActivate] Nudge error: {ex.Message}");
             }
         }
 

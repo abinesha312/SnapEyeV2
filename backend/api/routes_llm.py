@@ -40,7 +40,7 @@ class LLMRequest(BaseModel):
         default=None,
         description="System prompt to guide the LLM",
     )
-    max_tokens: int = Field(default=4096, ge=1, le=16384)
+    max_tokens: int = Field(default=16000, ge=1, le=16384)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     provider: Optional[str] = Field(
         default=None,
@@ -330,7 +330,7 @@ async def list_providers(user_data=Depends(auth_handler.verify_auth)):
 async def _stream_tokens(
     messages: List[LLMMessage],
     system_prompt: Optional[str] = None,
-    max_tokens: int = 4096,
+    max_tokens: int = 16000,
     temperature: float = 0.7,
     provider: Optional[str] = None,
     api_key: Optional[str] = None,

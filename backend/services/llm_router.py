@@ -275,10 +275,15 @@ class OpenAIProvider(BaseLLMProvider):
         kwargs = self._build_chat_kwargs(model, oai_messages, max_tokens, temperature, stream=True)
         stream = await client.chat.completions.create(**kwargs)
 
+        self.last_finish_reason = None
         async for chunk in stream:
-            delta = chunk.choices[0].delta
-            if delta.content:
-                yield delta.content
+            if chunk.choices:
+                fr = chunk.choices[0].finish_reason
+                if fr:
+                    self.last_finish_reason = fr
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    yield delta.content
 
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         client = self._build_client()
@@ -362,9 +367,16 @@ class AnthropicProvider(BaseLLMProvider):
         if system_prompt:
             kwargs["system"] = system_prompt
 
+        self.last_finish_reason = None
         async with client.messages.stream(**kwargs) as stream:
             async for text in stream.text_stream:
                 yield text
+            try:
+                final = await stream.get_final_message()
+                # Anthropic: "end_turn" | "max_tokens" | "stop_sequence" | ...
+                self.last_finish_reason = getattr(final, "stop_reason", None)
+            except Exception:
+                pass
 
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         # Anthropic doesn't have an embeddings API; fall back to OpenAI
@@ -626,6 +638,8 @@ class LLMRouter:
         # Providers built for per-request key overrides; cached so their internal
         # HTTP clients (and connection pools) survive across requests.
         self._override_providers: Dict[str, BaseLLMProvider] = {}
+        # Set after each streaming attempt ("length" / "max_tokens" => truncated).
+        self.last_finish_reason: Optional[str] = None
 
         # Register providers based on server-side env configuration. Per-request overrides
         # can still use providers whose env key is missing; see _build_provider_on_demand.
@@ -732,6 +746,17 @@ class LLMRouter:
 
         raise AllProvidersFailedError(f"All providers failed: {'; '.join(errors)}")
 
+    # OpenAI finish_reason "length" / Anthropic stop_reason "max_tokens".
+    _TRUNCATED_REASONS = frozenset({"length", "max_tokens"})
+
+    _CONTINUE_PROMPT = (
+        "Continue EXACTLY from where you stopped — do not restart, do not repeat prior text. "
+        "If you were mid-diagram or mid-table, resume that structure and finish every remaining "
+        "section through your required end marker "
+        "(e.g. 'Part 1 of 2 (Steps 1, 2, 3) complete, ready for capture' or "
+        "'Part 2 of 2 (Steps 4, 5) complete, design finalized')."
+    )
+
     async def generate_stream(
         self,
         messages: List[LLMMessage],
@@ -742,9 +767,85 @@ class LLMRouter:
         api_key: Optional[str] = None,
         model: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
-        """Generate a streaming response. Honors per-request provider/api_key/model override."""
+        """Generate a streaming response. Honors per-request provider/api_key/model override.
+
+        When the model hits the completion token cap mid-answer (common on large LLD UML
+        diagrams), automatically continues up to a few times so the user gets a full reply.
+        """
         max_tokens = max_tokens or settings.LLM_MAX_TOKENS
         temperature = temperature or settings.LLM_TEMPERATURE
+        self.last_finish_reason = None
+
+        accumulated = ""
+        work_messages = list(messages)
+        max_continues = 4
+
+        for cont in range(max_continues + 1):
+            self.last_finish_reason = None
+            async for token in self._generate_stream_once(
+                work_messages, max_tokens, temperature, system_prompt, provider, api_key, model
+            ):
+                accumulated += token
+                yield token
+
+            reason = self.last_finish_reason
+            truncated = reason in self._TRUNCATED_REASONS
+            if not truncated:
+                # Heuristic backup when a provider didn't report finish_reason.
+                truncated = self._looks_truncated_output(accumulated) and cont < max_continues
+            if not truncated or cont >= max_continues:
+                if truncated and cont >= max_continues:
+                    logger.warning(
+                        "LLM still truncated after %s continuations (reason=%s, chars=%s)",
+                        max_continues, reason, len(accumulated),
+                    )
+                break
+
+            logger.warning(
+                "LLM output truncated (reason=%s, chars=%s); auto-continuing %s/%s",
+                reason or "heuristic", len(accumulated), cont + 1, max_continues,
+            )
+            work_messages = list(messages) + [
+                LLMMessage(role="assistant", content=accumulated),
+                LLMMessage(role="user", content=self._CONTINUE_PROMPT),
+            ]
+
+    @staticmethod
+    def _looks_truncated_output(text: str) -> bool:
+        """True when a long answer looks cut off mid-structure (fences / UML / Part markers)."""
+        if not text or len(text) < 2500:
+            return False
+        stripped = text.rstrip()
+        if stripped.endswith(("```", "complete, ready for capture", "design finalized", "design finalized.")):
+            return False
+        # Unclosed markdown fence.
+        if stripped.count("```") % 2 == 1:
+            return True
+        # Mid ASCII box (last non-empty line looks like a cut UML row).
+        lines = [ln for ln in stripped.splitlines() if ln.strip()]
+        if not lines:
+            return False
+        last = lines[-1].rstrip()
+        if last.startswith(("+", "|", "┌", "└", "├", "─")) and not last.endswith(("+", "|", "┐", "┘", "┤")):
+            return True
+        # Started a Part/Step cadence but never closed it.
+        if ("Part 1 of 2" in text or "STEP 1 OF" in text.upper() or "Step 1 of" in text) and (
+            "complete, ready for capture" not in text and "design finalized" not in text
+        ):
+            return True
+        return False
+
+    async def _generate_stream_once(
+        self,
+        messages: List[LLMMessage],
+        max_tokens: int,
+        temperature: float,
+        system_prompt: Optional[str],
+        provider: Optional[str],
+        api_key: Optional[str],
+        model: Optional[str],
+    ) -> AsyncGenerator[str, None]:
+        """Single streaming attempt (no auto-continue). Sets ``last_finish_reason``."""
 
         # Race path: fire every race provider at once and stream the first to answer.
         # Only skipped when the client explicitly picked a provider outside the race.
@@ -769,6 +870,7 @@ class LLMRouter:
                 model_override=model,
             ):
                 yield token
+            self.last_finish_reason = getattr(prov, "last_finish_reason", None)
             return
 
         if not self._provider_order:
@@ -805,10 +907,12 @@ class LLMRouter:
                         stream.__anext__(), timeout=settings.LLM_FIRST_TOKEN_TIMEOUT_SECONDS
                     )
                 except StopAsyncIteration:
+                    self.last_finish_reason = getattr(prov, "last_finish_reason", None)
                     return  # empty but successful stream
                 yield first_token
                 async for token in stream:
                     yield token
+                self.last_finish_reason = getattr(prov, "last_finish_reason", None)
                 return  # success
             except asyncio.TimeoutError:
                 logger.warning(
@@ -929,6 +1033,10 @@ class LLMRouter:
         yield first_token
         async for token in gens[winner]:
             yield token
+        for name, prov, _key, _model in candidates:
+            if name == winner:
+                self.last_finish_reason = getattr(prov, "last_finish_reason", None)
+                break
 
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings (uses OpenAI preferentially)."""

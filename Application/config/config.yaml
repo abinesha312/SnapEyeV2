@@ -23,8 +23,9 @@ audio:
   sample_rate: 24000
   channels: 1
   encoding: "pcm16"
-  # Start with mic muted; unmute via the toolbar button or ` + Space.
-  mic_muted_by_default: true
+  # Default when no AppData app_settings.json exists. Dashboard → Settings can override.
+  # false = microphone On when Listen starts.
+  mic_muted_by_default: false
 
 transcription:
   model: "nova-3"

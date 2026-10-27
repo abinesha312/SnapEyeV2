@@ -75,10 +75,16 @@ namespace SnapEye.Services
             bool ok = RegisterHotKey(_src.Handle, id, flags, vk);
             if (!ok)
             {
+                // ERROR_HOTKEY_ALREADY_REGISTERED = 1409 — almost always another SnapEye
+                // process (or a leftover after a crash) still owns the combo.
+                const int ERROR_HOTKEY_ALREADY_REGISTERED = 1409;
                 int err = Marshal.GetLastWin32Error();
+                string hint = err == ERROR_HOTKEY_ALREADY_REGISTERED
+                    ? " Already taken — close other SnapEye instances (Task Manager) or the app that owns this shortcut."
+                    : " It may already be in use by another application.";
                 HotkeyRegistrationFailed?.Invoke(
                     this,
-                    $"Hotkey {DescribeCombo(modifiers, wpfKey)} could not be registered (Win32 error {err}). It may already be in use by another application.");
+                    $"Hotkey {DescribeCombo(modifiers, wpfKey)} could not be registered (Win32 error {err}).{hint}");
                 return false;
             }
 

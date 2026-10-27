@@ -25,19 +25,19 @@ namespace SnapEye.SolutionRegion
         // Includes single-dash arrows ("->", "<-") common in system-design sketches.
         // NOTE: do NOT treat bare "|---|" table separators as diagram anchors — that was
         // fencing real markdown tables into code blocks.
-        private static readonly Regex DiagramAnchor = new(
+        internal static readonly Regex DiagramAnchor = new(
             @"\+[-=]{2,}|[-=]{2,}\+|[│┃┌┐└┘├┤┬┴┼─━╔╗╚╝║═]|[-=]{2,}>|<[-=]{2,}|\[[^\]]+\]\s*-+>",
             RegexOptions.Compiled);
 
-        private static readonly Regex TableSeparator = new(
+        internal static readonly Regex TableSeparator = new(
             @"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$",
             RegexOptions.Compiled);
 
-        private static readonly Regex TableRow = new(
+        internal static readonly Regex TableRow = new(
             @"^\s*\|.*\|\s*$",
             RegexOptions.Compiled);
 
-        private static readonly Regex Fence = new(@"^\s{0,3}(```|~~~)", RegexOptions.Compiled);
+        internal static readonly Regex Fence = new(@"^\s{0,3}(```|~~~)", RegexOptions.Compiled);
 
         /// <summary>
         /// Wraps ASCII diagrams the model sent without a code fence in one, so their spacing
@@ -120,9 +120,25 @@ namespace SnapEye.SolutionRegion
             return string.Join("\n", output);
         }
 
-        private static bool IsMarkdownTableLine(string line)
+        internal static bool IsAsciiBoxRow(string line)
+        {
+            string t = line.Trim();
+            // Class-diagram frames: +----+ / +====+
+            if (Regex.IsMatch(t, @"^\+[-=]{3,}\+$")) return true;
+            // Box body / stereotype / member lines: | <<Facade>> |, | - field |, | + meth() |
+            if (t.StartsWith('|') && t.EndsWith('|')
+                && (t.Contains("<<", StringComparison.Ordinal)
+                    || Regex.IsMatch(t, @"\|\s*[-+#]")
+                    || Regex.IsMatch(t, @"\|\s+\w[\w:<>(),\s]*\|")))
+                return true;
+            return false;
+        }
+
+        internal static bool IsMarkdownTableLine(string line)
         {
             if (string.IsNullOrWhiteSpace(line)) return false;
+            // ASCII UML boxes also use pipes — do not treat them as GFM tables.
+            if (IsAsciiBoxRow(line)) return false;
             if (TableSeparator.IsMatch(line) || TableRow.IsMatch(line)) return true;
             // GFM row without leading pipe: "col a | col b | col c"
             string t = line.Trim();
@@ -130,18 +146,24 @@ namespace SnapEye.SolutionRegion
             return pipes >= 2 && !t.StartsWith("```", StringComparison.Ordinal);
         }
 
-        private static bool IsDiagramLine(string line)
+        internal static bool IsDiagramLine(string line)
         {
-            // Never treat GFM table rows / separators as diagram lines.
-            if (string.IsNullOrWhiteSpace(line) || IsMarkdownTableLine(line)) return false;
+            if (string.IsNullOrWhiteSpace(line)) return false;
+            // UML/class ASCII boxes are diagrams even when they look like table rows.
+            if (IsAsciiBoxRow(line)) return true;
+            // Real GFM tables stay out of diagram fencing.
+            if (IsMarkdownTableLine(line)) return false;
             if (DiagramAnchor.IsMatch(line)) return true;
             string t = line.Trim();
-            // Box body rows with heavy padding (not markdown tables).
             int pipes = t.Count(c => c == '|');
-            if (pipes >= 2 && Regex.IsMatch(line, @"\|\s{2,}|\s{2,}\|") && !TableRow.IsMatch(line))
+            if (pipes >= 2 && Regex.IsMatch(line, @"\|\s{2,}|\s{2,}\|"))
                 return true;
             // Connector rows between boxes: "^", "|", "| 1      v", "1..*".
             return Regex.IsMatch(t, @"^[|^vV<>*.\d:/\\\s-]+$") && Regex.IsMatch(t, @"[|^vV]");
         }
+
+        internal static bool IsTableSeparatorLine(string line) => TableSeparator.IsMatch(line);
+
+        internal static bool IsFenceLine(string line) => Fence.IsMatch(line);
     }
 }

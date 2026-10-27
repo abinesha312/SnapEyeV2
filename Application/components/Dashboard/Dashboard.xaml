@@ -375,6 +375,15 @@
                                             <TextBlock Text="Shortcuts" Margin="12,0,0,0" VerticalAlignment="Center"/>
                                         </StackPanel>
                                     </RadioButton>
+
+                                    <RadioButton x:Name="NavSettings" GroupName="DashNav"
+                                                 Style="{StaticResource NavItemStyle}" Checked="NavSettings_Checked">
+                                        <StackPanel Orientation="Horizontal">
+                                            <Path Width="16" Height="16" Stretch="Uniform" Fill="#6B6478"
+                                                  Data="M12,15.5A3.5,3.5 0 0,1 8.5,12A3.5,3.5 0 0,1 12,8.5A3.5,3.5 0 0,1 15.5,12A3.5,3.5 0 0,1 12,15.5M19.43,12.98C19.47,12.66 19.5,12.33 19.5,12C19.5,11.67 19.47,11.34 19.43,11.02L21.54,9.37C21.73,9.22 21.78,8.95 21.66,8.73L19.66,5.27C19.54,5.05 19.27,4.97 19.05,5.05L16.56,6.05C16.04,5.65 15.48,5.32 14.87,5.07L14.5,2.42C14.46,2.18 14.25,2 14,2H10C9.75,2 9.54,2.18 9.5,2.42L9.13,5.07C8.52,5.32 7.96,5.66 7.44,6.05L4.95,5.05C4.73,4.97 4.46,5.05 4.34,5.27L2.34,8.73C2.21,8.95 2.27,9.22 2.46,9.37L4.57,11.02C4.53,11.34 4.5,11.67 4.5,12C4.5,12.33 4.53,12.66 4.57,12.98L2.46,14.63C2.27,14.78 2.21,15.05 2.34,15.27L4.34,18.73C4.46,18.95 4.73,19.03 4.95,18.95L7.44,17.94C7.96,18.34 8.52,18.68 9.13,18.93L9.5,21.58C9.54,21.82 9.75,22 10,22H14C14.25,22 14.46,21.82 14.5,21.58L14.87,18.93C15.48,18.68 16.04,18.34 16.56,17.94L19.05,18.95C19.27,19.03 19.54,18.95 19.66,18.73L21.66,15.27C21.78,15.05 21.73,14.78 21.54,14.63L19.43,12.98Z"/>
+                                            <TextBlock Text="Settings" Margin="12,0,0,0" VerticalAlignment="Center"/>
+                                        </StackPanel>
+                                    </RadioButton>
                                 </StackPanel>
 
                                 <!-- Footer: sign-out -->
@@ -1052,6 +1061,65 @@
                                         </ItemsControl>
                                         <TextBlock x:Name="ShortcutsPrivacyNote" FontSize="12" Foreground="#888888"
                                                    TextWrapping="Wrap" Margin="2,8,0,0" LineHeight="18"/>
+                                    </StackPanel>
+                                </ScrollViewer>
+                            </Grid>
+
+                            <!-- Application settings -->
+                            <Grid x:Name="SettingsView" Visibility="Collapsed">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <StackPanel Grid.Row="0" Margin="0,4,0,16">
+                                    <TextBlock Text="Settings" FontSize="22" FontWeight="Bold" Foreground="#333333"/>
+                                    <TextBlock Text="Application preferences for the overlay. Changes apply the next time you start Listen."
+                                               FontSize="12" Foreground="#888888" Margin="0,2,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,0,4,0">
+                                    <StackPanel>
+                                        <Border Background="#FFFFFF" BorderBrush="#C5DFF8" BorderThickness="1"
+                                                CornerRadius="10" Padding="16,14" Margin="0,0,0,10">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                                    <TextBlock Text="Microphone" FontWeight="SemiBold" FontSize="14" Foreground="#333333"/>
+                                                    <TextBlock Text="When On, Listen starts with your mic unmuted so your speech is transcribed. When Off, Listen starts muted until you unmute."
+                                                               FontSize="12" Foreground="#777777" Margin="0,6,12,0" TextWrapping="Wrap"/>
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                                    <TextBlock x:Name="MicDefaultStateLabel" Text="On" FontSize="12" FontWeight="SemiBold"
+                                                               Foreground="#2563EB" VerticalAlignment="Center" Margin="0,0,10,0"
+                                                               MinWidth="28" TextAlignment="Right"/>
+                                                    <ToggleButton x:Name="MicDefaultToggle" Width="52" Height="28"
+                                                                  Checked="MicDefaultToggle_Changed" Unchecked="MicDefaultToggle_Changed"
+                                                                  Cursor="Hand" ToolTip="Microphone on by default when Listen starts">
+                                                        <ToggleButton.Template>
+                                                            <ControlTemplate TargetType="ToggleButton">
+                                                                <Border x:Name="Track" Background="#CBD5E1" CornerRadius="14" Width="52" Height="28">
+                                                                    <Border x:Name="Thumb" Background="#FFFFFF" CornerRadius="11"
+                                                                            Width="22" Height="22" HorizontalAlignment="Left"
+                                                                            Margin="3,0,0,0" VerticalAlignment="Center"/>
+                                                                </Border>
+                                                                <ControlTemplate.Triggers>
+                                                                    <Trigger Property="IsChecked" Value="True">
+                                                                        <Setter TargetName="Track" Property="Background" Value="#3A7BFF"/>
+                                                                        <Setter TargetName="Thumb" Property="HorizontalAlignment" Value="Right"/>
+                                                                        <Setter TargetName="Thumb" Property="Margin" Value="0,0,3,0"/>
+                                                                    </Trigger>
+                                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                                        <Setter TargetName="Track" Property="Opacity" Value="0.92"/>
+                                                                    </Trigger>
+                                                                </ControlTemplate.Triggers>
+                                                            </ControlTemplate>
+                                                        </ToggleButton.Template>
+                                                    </ToggleButton>
+                                                </StackPanel>
+                                            </Grid>
+                                        </Border>
                                     </StackPanel>
                                 </ScrollViewer>
                             </Grid>

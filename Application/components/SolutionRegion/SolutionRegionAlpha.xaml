@@ -152,7 +152,7 @@
 
                 <StackPanel x:Name="ChatHistoryPanel">
                     <TextBlock x:Name="ChatPlaceholder"
-                               Text="Ask anything, pick a quick action, or start listening — your conversation will appear here."
+                               Text="Ask anything, capture a screen, or start listening — everything in this session stays in one conversation."
                                Foreground="#94A3B8" FontSize="12" FontStyle="Italic"
                                FontFamily="Segoe UI" TextWrapping="Wrap"
                                Margin="4,12" HorizontalAlignment="Center"

@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
@@ -9,6 +10,13 @@ namespace SnapEye
 {
     public partial class App : Application
     {
+        /// <summary>
+        /// Only one SnapEye process may own the global RegisterHotKey slots
+        /// (Ctrl+Shift+S, Ctrl+Alt+Arrows, …). A second copy fails every hotkey with
+        /// "already in use" — which is what users see as the red hotkey error banner.
+        /// </summary>
+        private static Mutex? instanceMutex;
+
         /// <summary>
         /// Application startup - check session and show appropriate window
         /// </summary>
@@ -24,8 +32,23 @@ namespace SnapEye
 
             try
             {
-                // Load configuration
+                instanceMutex = new Mutex(true, @"Local\SnapEyeAI_SingleInstance", out bool createdNew);
+                if (!createdNew)
+                {
+                    MessageBox.Show(
+                        "SnapEye is already running.\n\n" +
+                        "Close the other overlay (or end SnapEye in Task Manager), then open it again.\n\n" +
+                        "Two copies cannot share the same global hotkeys — Windows only allows one owner.",
+                        "SnapEye already running",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                    Shutdown();
+                    return;
+                }
+
+                // Load configuration, then user prefs (mic on/off, etc.) from AppData.
                 Config.AppConfig.LoadConfiguration();
+                Services.AppSettingsService.ApplyToAppConfig();
 
                 // Warm up backend: polls /health and auto-starts the Podman Compose stack
                 // (scripts/start-snapeye-backend.ps1) if it isn't already running.
@@ -136,6 +159,9 @@ namespace SnapEye
         private void Application_Exit(object sender, ExitEventArgs e)
         {
             BackendProcessService.Stop();
+            try { instanceMutex?.ReleaseMutex(); } catch { /* abandoned is fine */ }
+            instanceMutex?.Dispose();
+            instanceMutex = null;
         }
     }
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
@@ -17,15 +18,15 @@ namespace SnapEye.SolutionRegion
         private readonly StringBuilder streamingBuffer = new();
         private bool isStreamingResponse;
         private Border? currentStreamingCard;
-        // Live plain-text element shown WHILE a chat answer streams. Rendering markdown
-        // on every token re-parses the whole document (O(n^2) for long answers) and makes
-        // the chat feel laggy; we stream into a cheap TextBlock instead and swap in a
-        // fully-rendered MarkdownViewer once the answer completes.
-        private TextBlock? currentStreamingTextBlock;
+        // Live markdown viewer for the stable (complete) prefix while streaming; incomplete
+        // trailing tables / fences / diagrams stay in currentStreamingPending as plain text.
+        private MarkdownViewer? currentStreamingViewer;
+        private TextBlock? currentStreamingPending;
+        private string lastStreamedStableMarkdown = "";
         private string lastFinalAnswer = "";
 
-        // Coalesces token updates so the markdown document is re-parsed at most ~12 fps
-        // instead of on every single SSE token (which could arrive 50+ times/second).
+        // Coalesces token updates so Markdig re-parses at most ~25 Hz, and only when the
+        // stable markdown prefix grows (pending-only growth updates the TextBlock alone).
         private DispatcherTimer? streamFlushTimer;
         private bool streamDirty;
         private static readonly TimeSpan StreamFlushInterval = TimeSpan.FromMilliseconds(40);
@@ -49,26 +50,14 @@ namespace SnapEye.SolutionRegion
         private string lastSystemPrefix = "";
         private DateTime lastUserActivity;
         private DateTime lastSystemActivity;
-        private bool hasPlaceholder = true;
         private bool chatHasPlaceholder = true;
         private double bubbleMaxWidth = 360;
         private double chatBubbleMaxWidth = 420;
 
-        // Transcript-targeted AI streaming state
-        private readonly StringBuilder transcriptStreamingBuffer = new();
-        private bool isTranscriptStreaming;
-        private TextBlock? transcriptStreamingTextBlock;
-        // The bubble hosting the live transcript answer. On completion we swap its plain
-        // TextBlock for a MarkdownViewer so **bold**, `code`, lists etc. render properly.
-        private Border? transcriptStreamingBubble;
-        private DispatcherTimer? transcriptTypingTimer;
-
         // Chat sticky-bottom
         private bool chatStickyBottom = true;
         // Transcript view auto-follow. Live transcription follows the newest line only while
-        // the user is already at the bottom; once they scroll up they stay put. Streaming AI
-        // answers never auto-scroll (the answer stays anchored where it began so the user can
-        // read/scroll freely during generation).
+        // the user is already at the bottom; once they scroll up they stay put.
         private bool transcriptStickyBottom = true;
 
         // Force-new-bubble after this much silence on the same source. Below this gap,
@@ -134,19 +123,23 @@ namespace SnapEye.SolutionRegion
 
         public void SwitchToChatTab()
         {
-            SafeInvoke(() =>
-            {
-                ChatViewRoot.Visibility = Visibility.Visible;
-                TranscriptionViewRoot.Visibility = Visibility.Collapsed;
-            });
+            // Capture chat and live-voice answers share one session panel (ChatView).
+            ShowUnifiedSessionView();
         }
 
         public void SwitchToTranscriptionTab()
         {
+            // Same panel as chat — switching Listen/Transcript must not open an empty
+            // second history. Speech bubbles and AI answers append to this session.
+            ShowUnifiedSessionView();
+        }
+
+        private void ShowUnifiedSessionView()
+        {
             SafeInvoke(() =>
             {
-                ChatViewRoot.Visibility = Visibility.Collapsed;
-                TranscriptionViewRoot.Visibility = Visibility.Visible;
+                ChatViewRoot.Visibility = Visibility.Visible;
+                TranscriptionViewRoot.Visibility = Visibility.Collapsed;
             });
         }
 
@@ -188,8 +181,19 @@ namespace SnapEye.SolutionRegion
                 StopStreamFlushTimer();
                 streamingBuffer.Clear();
                 currentStreamingCard = null;
-                currentStreamingTextBlock = null;
+                currentStreamingViewer = null;
+                currentStreamingPending = null;
+                lastStreamedStableMarkdown = "";
                 lastFinalAnswer = "";
+
+                // Speech bubbles are on this same panel — drop merge pointers.
+                lastUserBubble = null; lastUserText = null;
+                lastSystemBubble = null; lastSystemText = null;
+                lastUserMessageId = lastSystemMessageId = null;
+                lastUserPrefix = lastSystemPrefix = "";
+                lastBubbleSource = null;
+                lastUserActivity = default;
+                lastSystemActivity = default;
 
                 // Re-add placeholder
                 if (ChatPlaceholder != null)
@@ -248,6 +252,79 @@ namespace SnapEye.SolutionRegion
             });
         }
 
+        /// <summary>
+        /// Rebuild the shared session panel from a persisted conversation so reopening
+        /// the overlay shows the same thread (typed, spoken, and assistant answers).
+        /// </summary>
+        public void ReplayConversation(IReadOnlyList<ConversationMessage> messages)
+        {
+            SafeInvoke(() =>
+            {
+                ClearContent();
+                if (messages == null || messages.Count == 0) return;
+
+                ShowUnifiedSessionView();
+                RemoveChatPlaceholder();
+
+                string lastAnswer = "";
+                foreach (var m in messages)
+                {
+                    if (string.IsNullOrWhiteSpace(m.Text)) continue;
+
+                    switch (m.Kind)
+                    {
+                        case ConversationMessageKind.UserTyped:
+                            ChatHistoryPanel.Children.Add(BuildUserPromptRow(m.Text.Trim()));
+                            break;
+
+                        case ConversationMessageKind.QuickAction:
+                            string prompt = !string.IsNullOrWhiteSpace(m.Label) ? m.Label!.Trim() : m.Text.Trim();
+                            ChatHistoryPanel.Children.Add(BuildUserPromptRow(prompt));
+                            break;
+
+                        case ConversationMessageKind.UserSpoken:
+                        {
+                            var (row, border, textBlock) = CreateChatRow(m.Text.Trim(), MessageSource.Microphone);
+                            ChatHistoryPanel.Children.Add(row);
+                            lastUserBubble = border;
+                            lastUserText = textBlock;
+                            lastUserMessageId = null;
+                            lastUserPrefix = "";
+                            lastBubbleSource = MessageSource.Microphone;
+                            break;
+                        }
+
+                        case ConversationMessageKind.OtherSpoken:
+                        {
+                            var (row, border, textBlock) = CreateChatRow(m.Text.Trim(), MessageSource.Speaker);
+                            ChatHistoryPanel.Children.Add(row);
+                            lastSystemBubble = border;
+                            lastSystemText = textBlock;
+                            lastSystemMessageId = null;
+                            lastSystemPrefix = "";
+                            lastBubbleSource = MessageSource.Speaker;
+                            break;
+                        }
+
+                        case ConversationMessageKind.AssistantAnswer:
+                            ChatHistoryPanel.Children.Add(BuildAnswerCard(m.Text.Trim()));
+                            lastAnswer = m.Text.Trim();
+                            // Break speech-merge chain after an AI answer.
+                            lastBubbleSource = null;
+                            lastUserBubble = lastSystemBubble = null;
+                            lastUserText = lastSystemText = null;
+                            lastUserPrefix = lastSystemPrefix = "";
+                            break;
+                    }
+                }
+
+                lastFinalAnswer = lastAnswer;
+                chatStickyBottom = true;
+                ChatView?.ScrollToEnd();
+                HideJumpToLatest();
+            });
+        }
+
         #endregion
 
         #region Streaming AI Response
@@ -265,19 +342,20 @@ namespace SnapEye.SolutionRegion
                     StopStreamFlushTimer();
                     streamingBuffer.Clear();
                     currentStreamingCard = null;
-                    currentStreamingTextBlock = null;
+                    currentStreamingViewer = null;
+                    currentStreamingPending = null;
+                    lastStreamedStableMarkdown = "";
                 }
 
                 isStreamingResponse = true;
                 streamingBuffer.Clear();
+                lastStreamedStableMarkdown = "";
                 RemoveChatPlaceholder();
 
                 if (!string.IsNullOrWhiteSpace(question))
                     ChatHistoryPanel.Children.Add(BuildUserPromptRow(question.Trim()));
 
-                // Stream into a cheap live TextBlock; we render the rich MarkdownViewer once
-                // the answer is complete (keeps token display instant even for long answers).
-                currentStreamingCard = BuildStreamingCard(out currentStreamingTextBlock);
+                currentStreamingCard = BuildStreamingCard(out currentStreamingViewer, out currentStreamingPending);
                 ChatHistoryPanel.Children.Add(currentStreamingCard);
 
                 StartStreamFlushTimer();
@@ -286,10 +364,8 @@ namespace SnapEye.SolutionRegion
         }
 
         /// <summary>
-        /// Called on the UI dispatcher for every streamed token. We ONLY append to the buffer
-        /// and set a dirty flag; actual markdown re-rendering happens at a throttled rate
-        /// (see <see cref="StreamFlushInterval"/>) to prevent the Markdig parser from being
-        /// re-invoked on every single token.
+        /// Called on the UI dispatcher for every streamed token. Appends to the buffer and
+        /// sets a dirty flag; live markdown flush is throttled (see <see cref="StreamFlushInterval"/>).
         /// </summary>
         public void AppendStreamingToken(string token)
         {
@@ -304,18 +380,35 @@ namespace SnapEye.SolutionRegion
             streamDirty = true;
         }
 
-        /// <summary>Answer card whose body is a fast plain-text block, used during streaming.</summary>
-        private Border BuildStreamingCard(out TextBlock liveText)
+        /// <summary>
+        /// Answer card with live markdown (stable prefix) + plain pending suffix for incomplete
+        /// tables / fences / diagrams.
+        /// </summary>
+        private Border BuildStreamingCard(out MarkdownViewer viewer, out TextBlock pending)
         {
-            liveText = new TextBlock
+            viewer = new SnapEyeMarkdownViewer
+            {
+                Background = Brushes.Transparent,
+                Foreground = new SolidColorBrush(BubbleTextColor),
+                Pipeline = MarkdownRendering.Pipeline,
+            };
+            ApplyMarkdownTheme(viewer);
+            viewer.Markdown = "";
+
+            pending = new TextBlock
             {
                 Text = "…",
                 Foreground = new SolidColorBrush(BubbleTextColor),
                 FontSize = 13,
                 LineHeight = 18,
                 TextWrapping = TextWrapping.Wrap,
-                FontFamily = new FontFamily("Segoe UI"),
+                FontFamily = new FontFamily("Cascadia Code, Consolas, Courier New"),
+                Visibility = Visibility.Visible,
             };
+
+            var body = new StackPanel();
+            body.Children.Add(viewer);
+            body.Children.Add(pending);
 
             var accent = new Border
             {
@@ -329,9 +422,9 @@ namespace SnapEye.SolutionRegion
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             Grid.SetColumn(accent, 0);
-            Grid.SetColumn(liveText, 1);
+            Grid.SetColumn(body, 1);
             grid.Children.Add(accent);
-            grid.Children.Add(liveText);
+            grid.Children.Add(body);
 
             return new Border
             {
@@ -357,7 +450,7 @@ namespace SnapEye.SolutionRegion
                     ? fullResponse!
                     : streamingBuffer.ToString();
 
-                // Swap the live plain-text body for a fully-rendered markdown view so
+                // Swap the live split body for a fully-rendered markdown view so
                 // code blocks, **bold**, lists etc. display correctly in the final answer.
                 if (currentStreamingCard != null && !string.IsNullOrWhiteSpace(finalText))
                 {
@@ -374,13 +467,15 @@ namespace SnapEye.SolutionRegion
                         currentStreamingCard.Child = content;
                     }
                 }
-                else if (currentStreamingTextBlock != null)
-                    currentStreamingTextBlock.Text = finalText;
+                else if (currentStreamingPending != null)
+                    currentStreamingPending.Text = finalText;
 
                 lastFinalAnswer = finalText;
                 streamingBuffer.Clear();
                 currentStreamingCard = null;
-                currentStreamingTextBlock = null;
+                currentStreamingViewer = null;
+                currentStreamingPending = null;
+                lastStreamedStableMarkdown = "";
 
                 MaybeAutoScroll();
             });
@@ -392,11 +487,18 @@ namespace SnapEye.SolutionRegion
             {
                 isStreamingResponse = false;
                 StopStreamFlushTimer();
-                if (currentStreamingTextBlock != null)
-                    currentStreamingTextBlock.Text = $"⚠ Error: {error}";
+                if (currentStreamingPending != null)
+                {
+                    currentStreamingPending.Text = $"⚠ Error: {error}";
+                    currentStreamingPending.Visibility = Visibility.Visible;
+                }
+                if (currentStreamingViewer != null)
+                    currentStreamingViewer.Markdown = "";
                 streamingBuffer.Clear();
                 currentStreamingCard = null;
-                currentStreamingTextBlock = null;
+                currentStreamingViewer = null;
+                currentStreamingPending = null;
+                lastStreamedStableMarkdown = "";
                 MaybeAutoScroll();
             });
         }
@@ -420,18 +522,25 @@ namespace SnapEye.SolutionRegion
             streamDirty = false;
         }
 
-        /// <summary>Pushes the latest streaming buffer into the live text block, at most once per tick.</summary>
+        /// <summary>
+        /// Pushes the latest streaming buffer into the live markdown viewer (stable prefix)
+        /// and pending plain TextBlock, at most once per tick.
+        /// </summary>
         private void FlushStreamingBuffer()
         {
-            if (!streamDirty || !isStreamingResponse || currentStreamingTextBlock == null) return;
+            if (!streamDirty || !isStreamingResponse) return;
+            if (currentStreamingViewer == null && currentStreamingPending == null) return;
             streamDirty = false;
-            // Snapshot under UI thread — StringBuilder is not thread-safe, but all callers hit this
-            // via the dispatcher, so ToString() is safe here.
+
             string text = streamingBuffer.ToString();
             if (text.Length == 0) return;
             try
             {
-                currentStreamingTextBlock.Text = text;
+                ApplyLiveMarkdownSplit(
+                    text,
+                    currentStreamingViewer,
+                    currentStreamingPending,
+                    ref lastStreamedStableMarkdown);
             }
             catch (Exception ex)
             {
@@ -439,6 +548,50 @@ namespace SnapEye.SolutionRegion
             }
             // No auto-scroll during generation: the answer stays anchored where it began so
             // the user can read and scroll freely. The "New" pill lets them jump to the latest.
+        }
+
+        /// <summary>
+        /// Renders complete markdown live; holds incomplete trailing tables / fences / diagrams
+        /// as monospace plain text until those blocks close.
+        /// </summary>
+        private void ApplyLiveMarkdownSplit(
+            string fullText,
+            MarkdownViewer? viewer,
+            TextBlock? pending,
+            ref string lastStable)
+        {
+            var split = StreamingMarkdownSplit.Split(fullText);
+
+            if (viewer != null && !string.Equals(split.StableMarkdown, lastStable, StringComparison.Ordinal))
+            {
+                lastStable = split.StableMarkdown;
+                viewer.Markdown = string.IsNullOrEmpty(split.StableMarkdown)
+                    ? ""
+                    : MarkdownRendering.Prepare(split.StableMarkdown);
+            }
+
+            if (pending != null)
+            {
+                if (string.IsNullOrEmpty(split.PendingPlain))
+                {
+                    // Keep a caret-like ellipsis only before any content arrives.
+                    if (string.IsNullOrEmpty(split.StableMarkdown) && fullText.Length == 0)
+                    {
+                        pending.Text = "…";
+                        pending.Visibility = Visibility.Visible;
+                    }
+                    else
+                    {
+                        pending.Text = "";
+                        pending.Visibility = Visibility.Collapsed;
+                    }
+                }
+                else
+                {
+                    pending.Text = split.PendingPlain;
+                    pending.Visibility = Visibility.Visible;
+                }
+            }
         }
 
         #endregion
@@ -659,8 +812,35 @@ namespace SnapEye.SolutionRegion
             };
         }
 
+        // Spoken "You" (Y) bubbles stay compact: 3 visible lines, scroll for the rest.
+        private const double YouBubbleLineHeight = 18;
+        private const int YouBubbleMaxVisibleLines = 3;
+
+        private static FrameworkElement WrapYouBubbleText(TextBlock textBlock)
+        {
+            return new ScrollViewer
+            {
+                MaxHeight = YouBubbleLineHeight * YouBubbleMaxVisibleLines,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Focusable = false,
+                Padding = new Thickness(0),
+                Content = textBlock,
+            };
+        }
+
         private Grid BuildUserPromptRow(string text)
         {
+            var textBlock = new TextBlock
+            {
+                Text = text,
+                Foreground = new SolidColorBrush(UserTextColor),
+                FontSize = 13,
+                LineHeight = YouBubbleLineHeight,
+                TextWrapping = TextWrapping.Wrap,
+                FontFamily = new FontFamily("Segoe UI")
+            };
+
             var bubble = new Border
             {
                 Background = new SolidColorBrush(UserBubbleColor),
@@ -670,15 +850,7 @@ namespace SnapEye.SolutionRegion
                 Padding = new Thickness(12, 8, 12, 8),
                 MaxWidth = chatBubbleMaxWidth,
                 HorizontalAlignment = HorizontalAlignment.Right,
-                Child = new TextBlock
-                {
-                    Text = text,
-                    Foreground = new SolidColorBrush(UserTextColor),
-                    FontSize = 13,
-                    LineHeight = 18,
-                    TextWrapping = TextWrapping.Wrap,
-                    FontFamily = new FontFamily("Segoe UI")
-                }
+                Child = WrapYouBubbleText(textBlock),
             };
 
             var row = new Grid { Margin = new Thickness(28, 6, 0, 4) };
@@ -757,12 +929,10 @@ namespace SnapEye.SolutionRegion
                 if (atBottom) HideTranscriptJump();
             }
 
-            // New content arrived. While an answer streams we freeze the viewport, so show the
-            // jump button when the newest text is below the fold.
+            // New content arrived — show jump pill when the user is not already following.
             if (e.ExtentHeightChange > 0.5)
             {
-                bool following = !isTranscriptStreaming && transcriptStickyBottom;
-                if (!following && !atBottom)
+                if (!transcriptStickyBottom && !atBottom)
                     ShowTranscriptJump();
                 else if (atBottom)
                     HideTranscriptJump();
@@ -770,14 +940,11 @@ namespace SnapEye.SolutionRegion
         }
 
         /// <summary>
-        /// Follows the newest transcript content only while the user is at the bottom AND no
-        /// answer is streaming. During streaming the view is frozen so the user reads/scrolls
-        /// freely; the jump pill lets them opt back into the latest.
+        /// Follows the newest transcript content only while the user is at the bottom.
         /// </summary>
         private void MaybeAutoScrollTranscript()
         {
             if (TranscriptionView == null) return;
-            if (isTranscriptStreaming) return;
             if (transcriptStickyBottom)
                 TranscriptionView.Dispatcher.BeginInvoke(
                     new Action(() => TranscriptionView.ScrollToEnd()), DispatcherPriority.Background);
@@ -801,8 +968,8 @@ namespace SnapEye.SolutionRegion
         }
 
         /// <summary>
-        /// Cancels/finalizes any in-progress streaming answer in both views without an error
-        /// banner. Called when the user hits Stop. Shows a subtle "Canceled." note when nothing
+        /// Cancels/finalizes any in-progress streaming answer without an error banner.
+        /// Called when the user hits Stop. Shows a subtle "Canceled." note when nothing
         /// had streamed yet.
         /// </summary>
         public void CancelStreaming()
@@ -813,11 +980,6 @@ namespace SnapEye.SolutionRegion
                 {
                     string partial = streamingBuffer.ToString();
                     EndStreamingResponse(string.IsNullOrWhiteSpace(partial) ? "_Canceled._" : partial);
-                }
-                if (isTranscriptStreaming)
-                {
-                    string partial = transcriptStreamingBuffer.ToString();
-                    EndStreamingAnswerInTranscript(string.IsNullOrWhiteSpace(partial) ? "_Canceled._" : partial);
                 }
             });
         }
@@ -836,14 +998,7 @@ namespace SnapEye.SolutionRegion
 
         #region Transcription Display
 
-        private void RemovePlaceholder()
-        {
-            if (hasPlaceholder && TranscriptPlaceholder != null)
-            {
-                TranscriptPlaceholder.Visibility = Visibility.Collapsed;
-                hasPlaceholder = false;
-            }
-        }
+        private void RemovePlaceholder() => RemoveChatPlaceholder();
 
         public void AddUserTranscription(string text, bool isNewSegment = false, string? messageId = null)
         {
@@ -857,46 +1012,24 @@ namespace SnapEye.SolutionRegion
 
         public void AddAIAnswer(string text)
         {
+            // Unified session: AI answers always land on the shared chat panel.
             SafeInvoke(() =>
             {
-                if (TranscriptionPanel == null || string.IsNullOrWhiteSpace(text)) return;
-                RemovePlaceholder();
-
-                var (row, bubble, _) = CreateChatRow(text.Trim(), source: null);
-                // Render AI answers as markdown so formatting (bold, code, lists) shows.
-                bubble.Child = BuildBubbleMarkdownViewer(text.Trim());
-                TranscriptionPanel.Children.Add(row);
+                if (ChatHistoryPanel == null || string.IsNullOrWhiteSpace(text)) return;
+                RemoveChatPlaceholder();
+                ChatHistoryPanel.Children.Add(BuildAnswerCard(text.Trim()));
 
                 lastBubbleSource = null;
                 lastUserBubble = lastSystemBubble = null;
                 lastUserText = lastSystemText = null;
                 lastUserPrefix = lastSystemPrefix = "";
 
-                TranscriptionView?.ScrollToEnd();
+                MaybeAutoScroll();
             });
         }
 
-        /// <summary>Adds a user prompt bubble (typed or quick-action) to the transcript view.</summary>
-        public void AddUserPromptToTranscript(string text)
-        {
-            SafeInvoke(() =>
-            {
-                if (TranscriptionPanel == null || string.IsNullOrWhiteSpace(text)) return;
-                RemovePlaceholder();
-
-                var (row, _, _) = CreateChatRow(text.Trim(), MessageSource.Microphone);
-                TranscriptionPanel.Children.Add(row);
-
-                lastBubbleSource = MessageSource.Microphone;
-                lastUserBubble = lastSystemBubble = null;
-                lastUserText = lastSystemText = null;
-                lastUserPrefix = lastSystemPrefix = "";
-                lastUserActivity = default;
-                lastSystemActivity = default;
-
-                TranscriptionView?.ScrollToEnd();
-            });
-        }
+        /// <summary>Adds a user prompt bubble to the shared session (same as chat).</summary>
+        public void AddUserPromptToTranscript(string text) => AddUserPromptBubble(text);
 
         /// <summary>Adds a screen capture OCR text entry to the chat view (no image shown).</summary>
         public void AddScreenCaptureToChat(string ocrText)
@@ -912,25 +1045,8 @@ namespace SnapEye.SolutionRegion
             });
         }
 
-        /// <summary>Adds a screen capture OCR text entry to the transcript view (no image shown).</summary>
-        public void AddScreenCaptureToTranscript(string ocrText)
-        {
-            SafeInvoke(() =>
-            {
-                if (TranscriptionPanel == null || string.IsNullOrWhiteSpace(ocrText)) return;
-                RemovePlaceholder();
-
-                var card = BuildScreenCaptureCard(ocrText.Trim());
-                TranscriptionPanel.Children.Add(card);
-
-                lastBubbleSource = null;
-                lastUserBubble = lastSystemBubble = null;
-                lastUserText = lastSystemText = null;
-                lastUserPrefix = lastSystemPrefix = "";
-
-                TranscriptionView?.ScrollToEnd();
-            });
-        }
+        /// <summary>Adds a screen capture OCR entry to the shared session (same as chat).</summary>
+        public void AddScreenCaptureToTranscript(string ocrText) => AddScreenCaptureToChat(ocrText);
 
         private Border BuildScreenCaptureCard(string ocrText)
         {
@@ -988,149 +1104,17 @@ namespace SnapEye.SolutionRegion
 
         #endregion
 
-        #region Transcript-Targeted AI Streaming
+        #region Transcript Display Helpers
 
-        /// <summary>Starts a streaming AI answer that renders directly inside the transcript view.</summary>
-        public void BeginStreamingAnswerInTranscript(string? question)
-        {
-            SafeInvoke(() =>
-            {
-                if (TranscriptionPanel == null) return;
-                RemovePlaceholder();
+        /// <summary>Live-voice AI answers use the same streaming card as capture/chat.</summary>
+        public void BeginStreamingAnswerInTranscript(string? question) => BeginStreamingResponse(question);
 
-                if (!string.IsNullOrWhiteSpace(question))
-                {
-                    var (qRow, _, _) = CreateChatRow(question!.Trim(), MessageSource.Microphone);
-                    TranscriptionPanel.Children.Add(qRow);
-                }
-
-                isTranscriptStreaming = true;
-                transcriptStreamingBuffer.Clear();
-
-                var (row, bubble, textBlock) = CreateChatRow("...", source: null);
-                TranscriptionPanel.Children.Add(row);
-                transcriptStreamingTextBlock = textBlock;
-                transcriptStreamingBubble = bubble;
-
-                lastBubbleSource = null;
-                lastUserBubble = lastSystemBubble = null;
-                lastUserText = lastSystemText = null;
-                lastUserPrefix = lastSystemPrefix = "";
-
-                StartTranscriptTypingIndicator();
-                // Freeze the viewport where it was when the answer started — no auto-scroll
-                // during streaming. If the new text lands below the fold, the ScrollChanged
-                // handler surfaces the "New" jump pill so the user can opt in.
-            });
-        }
-
-        public void AppendStreamingAnswerToken(string token)
-        {
-            SafeInvoke(() =>
-            {
-                if (!isTranscriptStreaming || transcriptStreamingTextBlock == null) return;
-                transcriptStreamingBuffer.Append(token);
-                transcriptStreamingTextBlock.Text = transcriptStreamingBuffer.ToString();
-                // No auto-scroll while the answer streams — the user controls the scroll.
-            });
-        }
+        public void AppendStreamingAnswerToken(string token) => AppendStreamingToken(token);
 
         public void EndStreamingAnswerInTranscript(string? fullResponse = null, double? confidence = null)
-        {
-            SafeInvoke(() =>
-            {
-                isTranscriptStreaming = false;
-                StopTranscriptTypingIndicator();
+            => EndStreamingResponse(fullResponse, confidence);
 
-                string finalText = !string.IsNullOrEmpty(fullResponse)
-                    ? fullResponse!
-                    : transcriptStreamingBuffer.ToString();
-
-                // Replace the live plain text with rendered markdown so **bold**, `code`,
-                // lists and code blocks display correctly in the transcript answer bubble.
-                if (transcriptStreamingBubble != null && !string.IsNullOrWhiteSpace(finalText))
-                {
-                    if (confidence.HasValue)
-                    {
-                        var stack = new StackPanel();
-                        stack.Children.Add(BuildBubbleMarkdownViewer(finalText));
-                        stack.Children.Add(BuildConfidenceBadge(confidence.Value));
-                        transcriptStreamingBubble.Child = stack;
-                    }
-                    else
-                    {
-                        transcriptStreamingBubble.Child = BuildBubbleMarkdownViewer(finalText);
-                    }
-                }
-                else if (transcriptStreamingTextBlock != null)
-                    transcriptStreamingTextBlock.Text = finalText;
-
-                lastFinalAnswer = finalText;
-                transcriptStreamingBuffer.Clear();
-                transcriptStreamingTextBlock = null;
-                transcriptStreamingBubble = null;
-
-                // Keep the user's scroll position when the plain text swaps to rendered
-                // markdown — don't jump to the end on completion.
-            });
-        }
-
-        /// <summary>Themed MarkdownViewer sized to fit inside a transcript answer bubble.</summary>
-        private MarkdownViewer BuildBubbleMarkdownViewer(string markdown)
-        {
-            var viewer = new SnapEyeMarkdownViewer
-            {
-                Background = Brushes.Transparent,
-                Foreground = new SolidColorBrush(BubbleTextColor),
-                Pipeline = MarkdownRendering.Pipeline,
-                MaxWidth = bubbleMaxWidth,
-            };
-            ApplyMarkdownTheme(viewer);
-            viewer.Markdown = MarkdownRendering.Prepare(markdown);
-            return viewer;
-        }
-
-        public void ShowStreamingAnswerError(string error)
-        {
-            SafeInvoke(() =>
-            {
-                isTranscriptStreaming = false;
-                StopTranscriptTypingIndicator();
-                if (transcriptStreamingTextBlock != null)
-                    transcriptStreamingTextBlock.Text = "⚠ Error: " + error;
-                transcriptStreamingBuffer.Clear();
-                transcriptStreamingTextBlock = null;
-                transcriptStreamingBubble = null;
-                TranscriptionView?.ScrollToEnd();
-            });
-        }
-
-        private void StartTranscriptTypingIndicator()
-        {
-            transcriptTypingTimer?.Stop();
-            transcriptTypingTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
-            int dots = 0;
-            transcriptTypingTimer.Tick += (s, e) =>
-            {
-                if (!isTranscriptStreaming || transcriptStreamingTextBlock == null)
-                {
-                    transcriptTypingTimer?.Stop();
-                    return;
-                }
-                if (transcriptStreamingBuffer.Length == 0)
-                {
-                    dots = (dots + 1) % 4;
-                    transcriptStreamingTextBlock.Text = new string('.', Math.Max(1, dots));
-                }
-            };
-            transcriptTypingTimer.Start();
-        }
-
-        private void StopTranscriptTypingIndicator()
-        {
-            transcriptTypingTimer?.Stop();
-            transcriptTypingTimer = null;
-        }
+        public void ShowStreamingAnswerError(string error) => ShowStreamingError(error);
 
         public void MarkNextAsNewSegment()
         {
@@ -1144,10 +1128,11 @@ namespace SnapEye.SolutionRegion
 
         public void ClearTranscription()
         {
+            // Speech bubbles live on the shared ChatHistoryPanel. End Session clears that
+            // via ClearContent(); here we only reset live-merge state so a new listen
+            // doesn't append into stale You/O bubbles.
             SafeInvoke(() =>
             {
-                if (TranscriptionPanel == null) return;
-                TranscriptionPanel.Children.Clear();
                 lastUserBubble = null; lastUserText = null;
                 lastSystemBubble = null; lastSystemText = null;
                 lastUserMessageId = lastSystemMessageId = null;
@@ -1155,23 +1140,10 @@ namespace SnapEye.SolutionRegion
                 lastBubbleSource = null;
                 lastUserActivity = default;
                 lastSystemActivity = default;
-
-                isTranscriptStreaming = false;
-                StopTranscriptTypingIndicator();
-                transcriptStreamingBuffer.Clear();
-                transcriptStreamingTextBlock = null;
-                transcriptStreamingBubble = null;
-
-                if (TranscriptPlaceholder != null)
-                {
-                    TranscriptionPanel.Children.Add(TranscriptPlaceholder);
-                    TranscriptPlaceholder.Visibility = Visibility.Visible;
-                }
-                hasPlaceholder = true;
             });
         }
 
-        /// <summary>Clears both the chat thread and the transcription (used on End Session / new meeting).</summary>
+        /// <summary>Clears the shared session thread (used on End Session / new meeting).</summary>
         public void ClearAll()
         {
             ClearContent();
@@ -1182,8 +1154,8 @@ namespace SnapEye.SolutionRegion
         {
             SafeInvoke(() =>
             {
-                if (TranscriptionPanel == null || string.IsNullOrWhiteSpace(text)) return;
-                RemovePlaceholder();
+                if (ChatHistoryPanel == null || string.IsNullOrWhiteSpace(text)) return;
+                RemoveChatPlaceholder();
 
                 bool isUser = source == MessageSource.Microphone;
                 DateTime now = DateTime.Now;
@@ -1232,7 +1204,7 @@ namespace SnapEye.SolutionRegion
                     if (startNew)
                     {
                         var (row, border, textBlock) = CreateChatRow(trimmed, source);
-                        TranscriptionPanel.Children.Add(row);
+                        ChatHistoryPanel.Children.Add(row);
                         if (isUser)
                         {
                             lastUserBubble = border; lastUserText = textBlock;
@@ -1257,7 +1229,7 @@ namespace SnapEye.SolutionRegion
 
                 if (isUser) lastUserActivity = now; else lastSystemActivity = now;
                 lastBubbleSource = source;
-                MaybeAutoScrollTranscript();
+                MaybeAutoScroll();
             });
         }
 
@@ -1323,12 +1295,13 @@ namespace SnapEye.SolutionRegion
                 Text = text,
                 Foreground = new SolidColorBrush(textColor),
                 FontSize = 13,
-                LineHeight = 18,
+                LineHeight = isUser ? YouBubbleLineHeight : 18,
                 TextWrapping = TextWrapping.Wrap,
                 FontFamily = new FontFamily("Segoe UI"),
             };
 
-            bubble.Child = textBlock;
+            // "You" (mic) bubbles: fixed ~3-line viewport with internal scroll.
+            bubble.Child = isUser ? WrapYouBubbleText(textBlock) : textBlock;
 
             if (isUser)
             {

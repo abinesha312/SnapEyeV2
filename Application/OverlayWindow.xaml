@@ -452,7 +452,7 @@
                 </Border>
 
                 <Button x:Name="EndSessionBtn" Width="44" Height="44" Margin="8,0,0,0"
-                        Click="EndSession_Click" ToolTip="End session — stop audio and clear transcript"
+                        Click="EndSession_Click" ToolTip="End listen keeps chat; End again when idle clears the session"
                         Background="Transparent" Foreground="#FCA5A5" BorderBrush="#7F1D1D" BorderThickness="1"
                         FontSize="10" FontWeight="SemiBold" Cursor="Hand">
                     <Button.Template>

@@ -47,12 +47,17 @@ namespace SnapEye.Services
         public ScreenCaptureService(string backendUrl)
         {
             this.backendUrl = backendUrl;
+            // Full-screen Tesseract (2× upscale + dual PSM) often exceeds 30s in the
+            // container — especially when Pause/Play fires several OCR jobs at once.
             httpClient = new HttpClient
             {
                 BaseAddress = new Uri(backendUrl),
-                Timeout = TimeSpan.FromSeconds(30)
+                Timeout = TimeSpan.FromMinutes(3)
             };
         }
+
+        /// <summary>Last OCR failure message, or null after a successful extract (including empty text).</summary>
+        public string? LastOcrError { get; private set; }
 
         public void SetAuthToken(string token)
         {
@@ -237,8 +242,9 @@ namespace SnapEye.Services
         /// for a full screen is several megabytes, so the JSON serialize + StringContent
         /// allocation runs on a worker thread to keep the dispatcher responsive.
         /// </summary>
-        public async Task<string?> SendToOcrAsync(string base64Image)
+        public async Task<string?> SendToOcrAsync(string base64Image, string? sidecarPngPath = null)
         {
+            LastOcrError = null;
             try
             {
                 // Build the request body off the UI thread. Serializing 5–10 MB of base64
@@ -263,6 +269,7 @@ namespace SnapEye.Services
                 {
                     string friendlyError = ExtractErrorMessage(responseBody)
                         ?? $"OCR request failed: {(int)response.StatusCode} {response.StatusCode}";
+                    LastOcrError = friendlyError;
                     ErrorOccurred?.Invoke(this, friendlyError);
                     return null;
                 }
@@ -270,18 +277,39 @@ namespace SnapEye.Services
                 using var doc = JsonDocument.Parse(responseBody);
                 var root = doc.RootElement;
 
+                // Backend can return HTTP 200 with success:false (e.g. Tesseract missing).
+                if (root.TryGetProperty("success", out var successEl) && successEl.ValueKind == JsonValueKind.False)
+                {
+                    string err = root.TryGetProperty("error", out var errEl)
+                        ? (errEl.GetString() ?? "OCR unavailable")
+                        : "OCR unavailable";
+                    LastOcrError = err;
+                    ErrorOccurred?.Invoke(this, err);
+                    return null;
+                }
+
                 string extractedText = "";
                 if (root.TryGetProperty("text", out var textElement))
                 {
                     extractedText = textElement.GetString() ?? "";
                 }
 
+                if (!string.IsNullOrEmpty(extractedText) && !string.IsNullOrEmpty(sidecarPngPath))
+                    TrySaveOcrSidecar(sidecarPngPath, extractedText);
+
                 OcrResultReceived?.Invoke(this, extractedText);
                 return extractedText;
             }
+            catch (TaskCanceledException)
+            {
+                LastOcrError = "OCR timed out — try fewer screens at once, or wait and retry.";
+                ErrorOccurred?.Invoke(this, LastOcrError);
+                return null;
+            }
             catch (Exception ex)
             {
-                ErrorOccurred?.Invoke(this, $"OCR send error: {ex.Message}");
+                LastOcrError = $"OCR send error: {ex.Message}";
+                ErrorOccurred?.Invoke(this, LastOcrError);
                 return null;
             }
         }

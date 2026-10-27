@@ -36,18 +36,24 @@ namespace SnapEye.SolutionRegion
 
             // Outer conversation ScrollViewer owns vertical scroll.
             if (Template?.FindName("PART_ContentHost", this) is not DependencyObject)
-                Dispatcher.BeginInvoke(() => DisableInnerVerticalScroll(this), System.Windows.Threading.DispatcherPriority.Loaded);
+                Dispatcher.BeginInvoke(() => HardenInnerViewer(this), System.Windows.Threading.DispatcherPriority.Loaded);
             else
-                DisableInnerVerticalScroll(this);
+                HardenInnerViewer(this);
         }
 
         public override void OnApplyTemplate()
         {
             base.OnApplyTemplate();
-            DisableInnerVerticalScroll(this);
+            HardenInnerViewer(this);
         }
 
-        private static void DisableInnerVerticalScroll(DependencyObject root)
+        /// <summary>
+        /// Kill the default FlowDocument "Copy / Select All" context menu. That menu is a
+        /// separate top-level HWND and shows up in screen share / capture even when the
+        /// overlay itself is invisible. Copy still works via Ctrl+C (selection) and
+        /// Ctrl+Shift+C (whole answer).
+        /// </summary>
+        private static void HardenInnerViewer(DependencyObject root)
         {
             try
             {
@@ -55,11 +61,19 @@ namespace SnapEye.SolutionRegion
                 if (viewer == null) return;
                 viewer.VerticalScrollBarVisibility = ScrollBarVisibility.Disabled;
                 viewer.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+                viewer.ContextMenu = null;
+                viewer.ContextMenuOpening -= SuppressDefaultContextMenu;
+                viewer.ContextMenuOpening += SuppressDefaultContextMenu;
             }
             catch
             {
                 /* best effort */
             }
+        }
+
+        private static void SuppressDefaultContextMenu(object sender, ContextMenuEventArgs e)
+        {
+            e.Handled = true;
         }
 
         private static FlowDocumentScrollViewer? FindInnerViewer(DependencyObject root)

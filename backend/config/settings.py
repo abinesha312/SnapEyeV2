@@ -105,8 +105,8 @@ class Settings(BaseSettings):
     LLM_PRIMARY_PROVIDER: str = "anthropic"  # "openai", "anthropic", "gemini", or "grok"
     LLM_FALLBACK_PROVIDER: str = "openai"  # fallback when primary fails
     LLM_STREAM_ENABLED: bool = True
-    LLM_MAX_TOKENS: int = 4096
-    LLM_TEMPERATURE: float = 0.7
+    LLM_MAX_TOKENS: int = int(_yaml.get("llm", {}).get("max_tokens", 16000))
+    LLM_TEMPERATURE: float = float(_yaml.get("llm", {}).get("temperature", 0.7))
     # Per-provider request timeout for the failover loop, in seconds. Bounds how long
     # a hung/unresponsive provider can stall before we move to the next one, instead
     # of relying on the SDK's own (often much longer) default timeout. Applies to
@@ -171,7 +171,7 @@ class Settings(BaseSettings):
     # Other-party (system audio / O) speech only: answer every utterance as soon as it
     # ends (not mic / Y). Does not cancel an already-streaming speaker answer.
     LIVE_SPEAKER_ANSWER_ALL: bool = True
-    LIVE_SPEAKER_MIN_WORDS: int = 4
+    LIVE_SPEAKER_MIN_WORDS: int = 10
     # Wait this long with no other-party voice before finalizing the utterance and
     # auto-answering (live suggestion). ~2.5s is quick after the interviewer stops,
     # without firing on a short mid-sentence pause.

@@ -15,7 +15,6 @@ import logging
 import os
 import re
 import shutil
-from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 
 from PIL import Image
@@ -67,23 +66,18 @@ _INSTALL_HINT = (
 
 
 _UI_PATTERNS = [
-    r'^(File|Edit|View|Search|Encoding|Language|Settings|Tools|Macro|Run|Plugins|Window|\?).*',
     r'^.+ - Notepad\+\+',
     r'^(length:|lines:|Ln:|Col:|Pos:).*',
     r'^(Windows.*|UTF-8.*|INS|OVR)$',
-    r'.*\\.*\..*',
-    r'https?://\S+',
     r'^(Description|Editorial|Solutions|Submissions)$',
     r'^\d+$',
-    lambda s: sum(c.isalpha() for c in s) / max(len(s), 1) < 0.4,
+    # Mostly non-letters (icon debris), but keep code-ish lines with letters/digits.
+    lambda s: sum(c.isalpha() for c in s) / max(len(s), 1) < 0.25,
     lambda s: sum(1 for c in s if ord(c) > 127) > len(s) * 0.3,
-    lambda s: sum(1 for c in s if c in '[]{}()|\\/~`!@#$%^&*+=<>?') > len(s) * 0.4,
-    lambda s: len(re.findall(r'[A-Za-z]{2,}', s)) < 2 and len(s) > 10,
-    lambda s: sum(1 for c in s if c.isdigit() or c in '[]{}()|\\/~`!@#$%^&*+=<>?') > len(s) * 0.6,
-    # Toolbar icons and tab strips read as mixed-case fragments ("sHEHBR", "S[Bnenss").
-    lambda s: _plausible_word_ratio(s) < 0.5,
-    # Icon fragments ("v X", "sHHB R LE 4") have no real lowercase word.
-    lambda s: not re.search(r'\b[A-Za-z]?[a-z]{2,}\b', s),
+    lambda s: sum(1 for c in s if c in '[]{}()|\\/~`!@#$%^&*+=<>?') > len(s) * 0.5,
+    lambda s: len(re.findall(r'[A-Za-z]{2,}', s)) < 1 and len(s) > 10,
+    # Toolbar junk ("sHEHBR") — keep CamelCase / ALLCAPS identifiers (class names, enums).
+    lambda s: _plausible_word_ratio(s) < 0.35 and not re.search(r'[A-Z][a-z]+[A-Z]', s),
 ]
 
 _PLAUSIBLE_WORD = re.compile(r"[(\"']?(?:[A-Za-z][a-z]*|[A-Z]+|\d+(?:[.,:]\d+)*)[.,:;!?'\")]*")
@@ -218,10 +212,15 @@ class OCRService:
     @staticmethod
     def _extract_with_tesseract(image: Image.Image) -> str:
         import pytesseract
-        # 2x upscale: at native size the editor caret splits the current line into fragments.
-        # Converting also fully decodes the image, which the two threads below require.
+        # Upscale helps thin UI fonts; cap size so dual-PSM work stays under ~few seconds
+        # instead of 60–90s when Pause/Play queues several full screens at once.
         image = image.convert("RGB")
-        image = image.resize((image.width * 2, image.height * 2), Image.LANCZOS)
+        scale = 2.0 if image.width * image.height < 2_000_000 else 1.5
+        if scale != 1.0:
+            image = image.resize(
+                (int(image.width * scale), int(image.height * scale)),
+                Image.LANCZOS,
+            )
         base = "--oem 3"
         if os.path.isfile(os.path.join(_LOCAL_TESSDATA_DIR, "eng.traineddata")):
             # pytesseract keeps literal quotes on Windows, so only quote paths with spaces.
@@ -234,21 +233,18 @@ class OCRService:
             raw = pytesseract.image_to_string(image, lang="eng", config=f"{base} --psm {psm}")
             return _clean_ocr_lines(raw.splitlines())
 
-        # Each page mode drops lines the other finds: psm 3 keeps paragraph order but skips
-        # short lines in mostly-empty windows; psm 11 (sparse) catches those.
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            dense_future = pool.submit(run, 3)
-            sparse_future = pool.submit(run, 11)
-            dense, sparse = dense_future.result(), sparse_future.result()
-
+        # Dense first; only run sparse PSM when dense is thin (avoids always paying 2× CPU).
+        dense = run(3)
         merged = list(dense)
-        seen = [_normalize_line(line) for line in dense]
-        for line in sparse:
-            key = _normalize_line(line)
-            if not key or any(key in s for s in seen):
-                continue
-            merged.append(line)
-            seen.append(key)
+        if len("\n".join(dense)) < 180:
+            sparse = run(11)
+            seen = [_normalize_line(line) for line in dense]
+            for line in sparse:
+                key = _normalize_line(line)
+                if not key or any(key in s for s in seen):
+                    continue
+                merged.append(line)
+                seen.append(key)
         return "\n".join(merged)
 
     @property

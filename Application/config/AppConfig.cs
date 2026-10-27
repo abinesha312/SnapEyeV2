@@ -34,7 +34,7 @@ namespace SnapEye.Config
         public static int AudioSampleRate { get; set; } = 24000;
         public static int AudioChannels { get; set; } = 1;
         /// <summary>When true, the overlay starts with the microphone muted.</summary>
-        public static bool MicMutedByDefault { get; set; } = true;
+        public static bool MicMutedByDefault { get; set; } = false;
 
         // === Transcription ===
         public static string DeepgramModel { get; set; } = "nova-3";

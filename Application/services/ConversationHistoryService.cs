@@ -64,6 +64,10 @@ namespace SnapEye.Services
         {
             EnsureDir();
             ResumeActiveSession();
+            // Closing the overlay no longer archives — so multi-day chat piles into one
+            // current-session.json and the Conversations tab only shows the start date.
+            // Split completed calendar days into their own archived files.
+            ArchiveCompletedCalendarDays();
         }
 
         /// <summary>
@@ -90,6 +94,102 @@ namespace SnapEye.Services
                     Console.WriteLine($"[History] ResumeActiveSession failed: {ex.Message}");
                 }
             }
+        }
+
+        /// <summary>
+        /// Archive each local calendar day in the active thread that is older than today
+        /// as its own <c>session-*.json</c>. Keeps only today's messages in
+        /// <c>current-session.json</c> (or starts a fresh empty current session when
+        /// nothing is from today). Idempotent.
+        /// </summary>
+        public void ArchiveCompletedCalendarDays()
+        {
+            List<ConversationSession> toSave = new();
+            ConversationSession? newCurrent = null;
+            bool rewriteActive = false;
+
+            lock (sync)
+            {
+                if (Current.Messages.Count == 0) return;
+
+                var today = DateTime.Today;
+                var groups = Current.Messages
+                    .GroupBy(m => m.Timestamp.Date)
+                    .OrderBy(g => g.Key)
+                    .ToList();
+
+                bool hasToday = groups.Any(g => g.Key == today);
+                var archiveGroups = hasToday
+                    ? groups.Where(g => g.Key < today).ToList()
+                    : groups; // nothing from today → archive every prior day bucket
+
+                if (archiveGroups.Count == 0) return;
+
+                foreach (var g in archiveGroups)
+                {
+                    var dayMessages = g.OrderBy(m => m.Timestamp).ToList();
+                    if (dayMessages.Count == 0) continue;
+
+                    string? title = Current.Title;
+                    if (string.IsNullOrWhiteSpace(title) ||
+                        title.Equals("No conversation provided", StringComparison.OrdinalIgnoreCase))
+                        title = null;
+
+                    toSave.Add(new ConversationSession
+                    {
+                        SessionId = Guid.NewGuid().ToString("N"),
+                        StartedAt = dayMessages[0].Timestamp,
+                        EndedAt = dayMessages[^1].Timestamp,
+                        Title = title,
+                        Messages = dayMessages,
+                    });
+                }
+
+                if (hasToday)
+                {
+                    var todayMessages = groups
+                        .Where(g => g.Key == today)
+                        .SelectMany(g => g)
+                        .OrderBy(m => m.Timestamp)
+                        .ToList();
+                    Current.Messages = todayMessages;
+                    Current.StartedAt = todayMessages.Count > 0
+                        ? todayMessages[0].Timestamp
+                        : DateTime.Now;
+                    if (string.Equals(Current.Title, "No conversation provided", StringComparison.OrdinalIgnoreCase))
+                        Current.Title = null;
+                    liveSpokenById.Clear();
+                    newCurrent = CloneForSave(Current);
+                }
+                else
+                {
+                    Current = new ConversationSession();
+                    liveSpokenById.Clear();
+                    rewriteActive = true;
+                }
+            }
+
+            foreach (var archived in toSave)
+                SaveSafe(archived);
+
+            if (newCurrent != null)
+                SaveSafe(newCurrent);
+            else if (rewriteActive)
+            {
+                // Remove stale multi-day active file so the list doesn't keep the blob.
+                try
+                {
+                    string activePath = Path.Combine(RootDir, ActiveSessionFileName);
+                    if (File.Exists(activePath)) File.Delete(activePath);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[History] Clear active after day-split failed: {ex.Message}");
+                }
+            }
+
+            if (toSave.Count > 0)
+                Console.WriteLine($"[History] Archived {toSave.Count} completed calendar day(s) from active session.");
         }
 
         /// <summary>Start a brand-new meeting session (previous one is flushed to disk).</summary>
@@ -308,24 +408,40 @@ namespace SnapEye.Services
         }
 
         /// <summary>
-        /// Replace the in-memory conversation with the server's version of it, so a
-        /// relaunched app resumes the same ongoing thread instead of starting blank.
-        /// Called once at startup after GET /api/conversations/active resolves.
+        /// Attach the server conversation id and, when the server thread is richer than
+        /// the local file, replace in-memory messages. Never shrinks a longer local
+        /// thread (sync lag / offline appends are common). Returns true when the
+        /// message list changed so callers can re-render the UI.
         /// </summary>
-        public void HydrateFromServer(string conversationId, IEnumerable<ConversationMessage> messages)
+        public bool HydrateFromServer(string conversationId, IEnumerable<ConversationMessage> messages)
         {
             lock (sync)
             {
                 Current.ConversationId = conversationId;
+                var list = messages as IList<ConversationMessage> ?? new List<ConversationMessage>(messages);
+                if (list.Count == 0 || list.Count <= Current.Messages.Count)
+                    return false;
+
                 Current.Messages.Clear();
-                Current.Messages.AddRange(messages);
+                Current.Messages.AddRange(list);
                 liveSpokenById.Clear();
+                return true;
             }
+        }
+
+        /// <summary>Thread-safe snapshot of the current session messages (for UI replay).</summary>
+        public IReadOnlyList<ConversationMessage> GetMessagesSnapshot()
+        {
+            lock (sync)
+                return Current.Messages.ToList();
         }
 
         /// <summary>List saved sessions (newest first). Uses blocking I/O; callers on the UI thread should wrap in <see cref="Task.Run(System.Func{IReadOnlyList{ConversationSession}})"/>.</summary>
         public IReadOnlyList<ConversationSession> ListSavedSessions()
         {
+            // Ensure multi-day active threads are split before we read the folder.
+            ArchiveCompletedCalendarDays();
+
             var list = new List<ConversationSession>();
             try
             {

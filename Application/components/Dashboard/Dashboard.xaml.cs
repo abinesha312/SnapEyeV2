@@ -638,6 +638,7 @@ namespace SnapEye.Dashboard
             if (PromptsView != null) PromptsView.Visibility = Visibility.Collapsed;
             if (AiModelsView != null) AiModelsView.Visibility = Visibility.Collapsed;
             if (ShortcutsView != null) ShortcutsView.Visibility = Visibility.Collapsed;
+            if (SettingsView != null) SettingsView.Visibility = Visibility.Collapsed;
             if (ExperienceView != null) ExperienceView.Visibility = Visibility.Collapsed;
         }
 
@@ -682,10 +683,68 @@ namespace SnapEye.Dashboard
             if (ExperienceView != null) ExperienceView.Visibility = Visibility.Visible;
         }
 
+        private void ShowSettingsView()
+        {
+            CollapseAllViews();
+            if (SettingsView != null) SettingsView.Visibility = Visibility.Visible;
+            LoadSettingsUi();
+        }
+
+        private bool micToggleUiReady;
+
+        private void LoadSettingsUi()
+        {
+            try
+            {
+                var settings = AppSettingsService.Load();
+                micToggleUiReady = false;
+                if (MicDefaultToggle != null)
+                    MicDefaultToggle.IsChecked = settings.MicrophoneOnByDefault;
+                UpdateMicDefaultStateLabel(settings.MicrophoneOnByDefault);
+                micToggleUiReady = true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Dashboard] LoadSettingsUi error: {ex.Message}");
+                micToggleUiReady = true;
+            }
+        }
+
+        private void UpdateMicDefaultStateLabel(bool on)
+        {
+            if (MicDefaultStateLabel == null) return;
+            MicDefaultStateLabel.Text = on ? "On" : "Off";
+            MicDefaultStateLabel.Foreground = new SolidColorBrush(
+                on ? Color.FromRgb(0x25, 0x63, 0xEB) : Color.FromRgb(0x88, 0x88, 0x88));
+        }
+
+        private void MicDefaultToggle_Changed(object sender, RoutedEventArgs e)
+        {
+            if (!micToggleUiReady || MicDefaultToggle == null) return;
+            try
+            {
+                bool on = MicDefaultToggle.IsChecked == true;
+                var settings = AppSettingsService.Load();
+                settings.MicrophoneOnByDefault = on;
+                AppSettingsService.Save(settings);
+                UpdateMicDefaultStateLabel(on);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Dashboard] MicDefaultToggle error: {ex.Message}");
+            }
+        }
+
         private void NavShortcuts_Checked(object sender, RoutedEventArgs e)
         {
             if (!IsLoaded) return;
             ShowShortcutsView();
+        }
+
+        private void NavSettings_Checked(object sender, RoutedEventArgs e)
+        {
+            if (!IsLoaded) return;
+            ShowSettingsView();
         }
 
         private void NavExperience_Checked(object sender, RoutedEventArgs e)
@@ -932,7 +991,11 @@ namespace SnapEye.Dashboard
                 : ConversationTitleService.Fallback(s);
 
             int count = s.Messages?.Count ?? 0;
-            string meta = $"{s.StartedAt:MMM d, yyyy · h:mm tt} · {count} message{(count == 1 ? "" : "s")}";
+            DateTime lastActivity = count > 0
+                ? s.Messages!.Max(m => m.Timestamp)
+                : (s.EndedAt ?? s.StartedAt);
+            string ongoing = !s.EndedAt.HasValue ? " · Ongoing" : "";
+            string meta = $"{lastActivity:MMM d, yyyy · h:mm tt}{ongoing} · {count} message{(count == 1 ? "" : "s")}";
 
             var titleBlock = new TextBlock
             {

@@ -111,10 +111,6 @@ namespace SnapEye
 
         private bool captureHooksReplayed;
 
-        // Routing target for the active streaming response
-        private enum StreamTarget { Chat, Transcript }
-        private StreamTarget streamTarget = StreamTarget.Transcript;
-
         // Re-entry guard for screen capture: 0 = idle, 1 = capture in flight.
         // Atomically flipped via Interlocked.Exchange so rapid clicks of the
         // camera / screenshot buttons can't fire overlapping OCR requests
@@ -169,21 +165,15 @@ namespace SnapEye
             SubscribeToEvents();
             PopulateModeSelector();
             PopulateQuickActions();
-            // Resume server-side thread on top of the local current-session.json (if any).
+            // Sync conversation id / richer server history into the local model only —
+            // do NOT replay into the overlay UI on launch (Conversations tab owns history).
             _ = HydrateConversationFromServerAsync();
         }
 
         /// <summary>
-        /// Resume the caller's ongoing server-side conversation (if reachable) so it
-        /// persists across app restarts instead of always starting fresh. Best-effort:
-        /// silently keeps the new local session on any failure (offline, first run, etc.).
-        ///
-        /// This hydrates the underlying data model (<see cref="history"/> and its saved-
-        /// session JSON) so "New Conversation" and the conversation boundary work
-        /// correctly across restarts. It intentionally does NOT replay history into the
-        /// live ChatHistoryPanel/transcript views - AssistantAnswer entries don't record
-        /// which view they originally streamed into, so guessing would risk misplacing
-        /// them; re-rendering old bubbles on launch is a follow-up UI enhancement.
+        /// Resume the caller's ongoing server-side conversation (if reachable). Best-effort:
+        /// local <c>current-session.json</c> stays authoritative when it has more messages
+        /// than the server (common when sync lagged).
         /// </summary>
         private async Task HydrateConversationFromServerAsync()
         {
@@ -192,12 +182,10 @@ namespace SnapEye
                 var result = await conversationSync.FetchActiveConversationAsync();
                 if (result == null) return;
                 var (conversationId, messages) = result.Value;
-                if (messages.Count == 0) return;
 
-                // Server is authoritative when it has history; merge into the single ongoing
-                // local thread so voice/text/image all stay in one conversation.
-                history.HydrateFromServer(conversationId, messages);
-                history.SaveCurrentNow();
+                bool grew = history.HydrateFromServer(conversationId, messages);
+                if (grew || !string.IsNullOrEmpty(conversationId))
+                    history.SaveCurrentNow();
             }
             catch (Exception ex)
             {
@@ -614,6 +602,39 @@ namespace SnapEye
             try { NoActivateWindow.HookAllPopups(this); } catch { /* best effort */ }
             try { NoActivateWindow.HookContextMenu(SettingsMenu); } catch { /* best effort */ }
             try { NoActivateWindow.HookComboBoxPopup(ModeSelector); } catch { /* best effort */ }
+
+            // Catch any late/default context menus (e.g. FlowDocument Copy/Select All) that
+            // were not present when HookAllPopups ran, and hide them from capture.
+            try
+            {
+                RemoveHandler(FrameworkElement.ContextMenuOpeningEvent, (ContextMenuEventHandler)OnOverlayContextMenuOpening);
+                AddHandler(FrameworkElement.ContextMenuOpeningEvent, (ContextMenuEventHandler)OnOverlayContextMenuOpening, true);
+            }
+            catch { /* best effort */ }
+        }
+
+        private void OnOverlayContextMenuOpening(object sender, ContextMenuEventArgs e)
+        {
+            try
+            {
+                // Default document editor menu (Copy / Select All) — block; it leaks into captures.
+                if (e.Source is FlowDocumentScrollViewer)
+                {
+                    e.Handled = true;
+                    return;
+                }
+
+                if (e.Source is FrameworkElement fe && fe.ContextMenu != null)
+                {
+                    if (AppConfig.InvisibleToCapture)
+                        CaptureInvisibility.HookContextMenu(fe.ContextMenu);
+                    NoActivateWindow.HookContextMenu(fe.ContextMenu);
+                }
+            }
+            catch
+            {
+                /* best effort */
+            }
         }
 
         private void RegisterGlobalHotkeys()
@@ -622,7 +643,8 @@ namespace SnapEye
             {
                 hotkeyService?.Dispose();
                 hotkeyService = new GlobalHotkeyService(this);
-                hotkeyService.HotkeyRegistrationFailed += (s, msg) => ShowInlineError(msg);
+                var failedCombos = new System.Collections.Generic.List<string>();
+                hotkeyService.HotkeyRegistrationFailed += (_, msg) => failedCombos.Add(msg);
 
                 uint ctrlShift = GlobalHotkeyService.MOD_CONTROL | GlobalHotkeyService.MOD_SHIFT;
 
@@ -713,6 +735,15 @@ namespace SnapEye
                     try { AdjustOpacity(-OpacityStep); }
                     catch (Exception ex) { Console.WriteLine($"[Hotkey] Opacity down error: {ex.Message}"); }
                 }, allowRepeat: true);
+
+                if (failedCombos.Count > 0)
+                {
+                    foreach (string msg in failedCombos)
+                        Console.WriteLine($"[Hotkey] {msg}");
+                    ShowInlineError(failedCombos.Count == 1
+                        ? failedCombos[0]
+                        : $"{failedCombos.Count} hotkeys failed (usually another SnapEye is still running). Close extras in Task Manager, then restart.");
+                }
             }
             catch (Exception ex)
             {
@@ -739,32 +770,16 @@ namespace SnapEye
         }
 
         /// <summary>
-        /// Move the overlay by a delta in pixels, clamped to the virtual screen so the
-        /// window stays at least partially usable on multi-monitor setups.
+        /// Move the overlay by a delta in physical pixels. Uses Win32 virtual-screen bounds
+        /// (PerMonitorV2-safe) and only keeps a thin strip on-screen so Ctrl+Alt+→ can reach
+        /// the right edge instead of stopping halfway.
         /// </summary>
         private void NudgeOverlay(int dx, int dy)
         {
             try
             {
                 if (!IsLoaded) return;
-
-                double left = Left + dx;
-                double top = Top + dy;
-                double vx = SystemParameters.VirtualScreenLeft;
-                double vy = SystemParameters.VirtualScreenTop;
-                double vw = SystemParameters.VirtualScreenWidth;
-                double vh = SystemParameters.VirtualScreenHeight;
-
-                UpdateLayout();
-                double w = ActualWidth;
-                double h = ActualHeight;
-                if (w <= 0 || double.IsNaN(w)) w = Width;
-                if (h <= 0 || double.IsNaN(h)) h = RenderSize.Height > 0 ? RenderSize.Height : MinHeight;
-
-                left = Math.Max(vx, Math.Min(left, vx + vw - w));
-                top = Math.Max(vy, Math.Min(top, vy + vh - h));
-                Left = left;
-                Top = top;
+                NoActivateWindow.Nudge(this, dx, dy);
             }
             catch (Exception ex)
             {
@@ -867,23 +882,14 @@ namespace SnapEye
             // Screen capture events
             screenCaptureService.ErrorOccurred += OnServiceError;
 
-            // Streaming response events. Answers are routed to the view that initiated the stream
-            // (tracked via `streamTarget`). The user's prompt bubble and the empty answer bubble
+            // Streaming response events. The user's prompt bubble and the empty answer bubble
             // are created up-front by the initiator (Send_Click / RunContextualPromptAsync /
             // CameraBtn_Click / transcription AI suggestions).
+            // Capture + live-voice answers share one session panel.
             streamingService.TokenReceived += (s, token) => Dispatcher.BeginInvoke(new Action(() =>
             {
-                try
-                {
-                    if (streamTarget == StreamTarget.Chat)
-                        AlphaRegion.AppendStreamingToken(token);
-                    else
-                        AlphaRegion.AppendStreamingAnswerToken(token);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[UI] TokenReceived render error: {ex.Message}");
-                }
+                try { AlphaRegion.AppendStreamingToken(token); }
+                catch (Exception ex) { Console.WriteLine($"[UI] TokenReceived render error: {ex.Message}"); }
             }));
             streamingService.ConfidenceReceived += (s, conf) => pendingManualConfidence = conf;
             streamingService.StreamStarted += (s, e) => Dispatcher.BeginInvoke(new Action(() =>
@@ -906,10 +912,7 @@ namespace SnapEye
                     UpdateStopButton();
                     double? conf = pendingManualConfidence;
                     pendingManualConfidence = null;
-                    if (streamTarget == StreamTarget.Chat)
-                        AlphaRegion.EndStreamingResponse(full, conf);
-                    else
-                        AlphaRegion.EndStreamingAnswerInTranscript(full, conf);
+                    AlphaRegion.EndStreamingResponse(full, conf);
                     if (!string.IsNullOrWhiteSpace(full))
                         history.Append(ConversationMessageKind.AssistantAnswer, full);
                 }
@@ -924,10 +927,7 @@ namespace SnapEye
                 {
                     manualStreaming = false;
                     UpdateStopButton();
-                    if (streamTarget == StreamTarget.Chat)
-                        AlphaRegion.ShowStreamingError(err);
-                    else
-                        AlphaRegion.ShowStreamingAnswerError(err);
+                    AlphaRegion.ShowStreamingError(err);
                 }
                 catch (Exception ex)
                 {
@@ -1048,14 +1048,22 @@ namespace SnapEye
         {
             try
             {
+                // While live listen is on: only stop audio. Keep the shared capture + voice
+                // conversation (same as switching Capture ↔ Listen). A second End while
+                // already idle archives the session and clears the panel for a fresh start.
                 if (IsListening)
-                    await StopTranscriptionAsync();
-                else
                 {
-                    streamingService.CancelCurrentStream();
-                    UpdateListeningUI(false);
-                    StopSessionTimer();
+                    await StopTranscriptionAsync();
+                    TranscriptToggle.IsChecked = false;
+                    AlphaRegion.SwitchToChatTab();
+                    UpdateCameraVisibility();
+                    ClearInlineError();
+                    return;
                 }
+
+                streamingService.CancelCurrentStream();
+                UpdateListeningUI(false);
+                StopSessionTimer();
 
                 transcriptionService.ClearConversation();
 
@@ -1318,6 +1326,10 @@ namespace SnapEye
             {
                 history.StartNewSession();
                 conversationSync.StartNewConversationAsync();
+                AlphaRegion.ClearAll();
+                AlphaRegion.SwitchToChatTab();
+                AlphaRegion.SetMarkdownContent(
+                    "**New conversation.**\n\nPrevious thread was saved. Ask AI, capture, or Listen to continue.");
             }
             catch (Exception ex)
             {
@@ -1447,10 +1459,7 @@ namespace SnapEye
             catch (Exception ex)
             {
                 Console.WriteLine($"[UI] Quick action error: {ex.Message}");
-                if (streamTarget == StreamTarget.Chat)
-                    AlphaRegion.ShowStreamingError(ex.Message);
-                else
-                    AlphaRegion.ShowStreamingAnswerError(ex.Message);
+                AlphaRegion.ShowStreamingError(ex.Message);
             }
         }
 
@@ -1522,15 +1531,10 @@ namespace SnapEye
             // Quick actions route to the *current* view. They intentionally use only the conversation
             // context (typed/spoken Q&A and transcription) — NOT any pending screen OCR — so clicking
             // a quick action never silently injects a stale screenshot.
-            bool inTranscript = TranscriptToggle.IsChecked == true;
-            streamTarget = inTranscript ? StreamTarget.Transcript : StreamTarget.Chat;
-            SetLastQuestion(userPrompt, inTranscript);
+            SetLastQuestion(userPrompt, inTranscript: false);
 
             history.Append(ConversationMessageKind.QuickAction, userPrompt, displayLabel);
-            if (inTranscript)
-                AlphaRegion.BeginStreamingAnswerInTranscript(displayLabel);
-            else
-                AlphaRegion.BeginStreamingResponse(displayLabel);
+            AlphaRegion.BeginStreamingResponse(displayLabel);
 
             manualStreaming = true;
             UpdateStopButton();
@@ -1587,26 +1591,18 @@ namespace SnapEye
                 ExpandSessionIfCollapsed();
                 ClearInlineError();
 
-                // Route typed prompts + AI answers into the *current* view (chat stays in chat).
-                bool inTranscript = TranscriptToggle.IsChecked == true;
-                streamTarget = inTranscript ? StreamTarget.Transcript : StreamTarget.Chat;
-                SetLastQuestion(query, inTranscript);
+                // Typed prompts + answers always append to the shared session panel.
+                SetLastQuestion(query, inTranscript: false);
 
                 history.Append(ConversationMessageKind.UserTyped, query);
-                if (inTranscript)
-                    AlphaRegion.BeginStreamingAnswerInTranscript(query);
-                else
-                    AlphaRegion.BeginStreamingResponse(query);
+                AlphaRegion.BeginStreamingResponse(query);
 
                 await StreamUserDirectedLlmAsync(query);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[UI] Send error: {ex.Message}");
-                if (streamTarget == StreamTarget.Chat)
-                    AlphaRegion.ShowStreamingError(ex.Message);
-                else
-                    AlphaRegion.ShowStreamingAnswerError(ex.Message);
+                AlphaRegion.ShowStreamingError(ex.Message);
             }
         }
 
@@ -1643,14 +1639,9 @@ namespace SnapEye
                 ExpandSessionIfCollapsed();
                 ClearInlineError();
 
-                bool inTranscript = lastAnswerWasTranscript;
-                streamTarget = inTranscript ? StreamTarget.Transcript : StreamTarget.Chat;
 
                 string question = lastAnsweredQuestion!;
-                if (inTranscript)
-                    AlphaRegion.BeginStreamingAnswerInTranscript(question);
-                else
-                    AlphaRegion.BeginStreamingResponse(question);
+                AlphaRegion.BeginStreamingResponse(question);
 
                 string regenInstruction = question +
                     "\n\nAnswer the SAME question again, but give a DIFFERENT explanation: " +
@@ -1661,10 +1652,7 @@ namespace SnapEye
             catch (Exception ex)
             {
                 Console.WriteLine($"[UI] Regenerate error: {ex.Message}");
-                if (streamTarget == StreamTarget.Chat)
-                    AlphaRegion.ShowStreamingError(ex.Message);
-                else
-                    AlphaRegion.ShowStreamingAnswerError(ex.Message);
+                AlphaRegion.ShowStreamingError(ex.Message);
             }
         }
 
@@ -1689,10 +1677,6 @@ namespace SnapEye
                 ExpandSessionIfCollapsed();
                 ClearInlineError();
 
-                // Honour the user's chosen view. The camera button is hidden while the
-                // Transcript toggle is ON, so in practice this routes to the Chat view.
-                bool inTranscript = TranscriptToggle.IsChecked == true;
-
                 if (IsBatchCaptureMode)
                 {
                     await BufferCaptureForBatchAsync().ConfigureAwait(true);
@@ -1709,10 +1693,7 @@ namespace SnapEye
                 if (!string.IsNullOrEmpty(screenCaptureService.LastSavedCapturePath))
                     Console.WriteLine($"[Screen] Local capture: {screenCaptureService.LastSavedCapturePath}");
 
-                if (inTranscript)
-                    AlphaRegion.AddScreenCaptureToTranscript(displayText);
-                else
-                    AlphaRegion.AddScreenCaptureToChat(displayText);
+                AlphaRegion.AddScreenCaptureToChat(displayText);
 
                 if (!string.IsNullOrWhiteSpace(ocrText))
                 {
@@ -1724,7 +1705,7 @@ namespace SnapEye
                 // The model reads the screenshot itself, so answer even when OCR found nothing.
                 string? imageBase64 = screenCaptureService.LastCaptureBase64;
                 if (!string.IsNullOrWhiteSpace(ocrText) || !string.IsNullOrEmpty(imageBase64))
-                    await StreamAnswerForScreenCaptureAsync(ocrText ?? "", imageBase64, inTranscript);
+                    await StreamAnswerForScreenCaptureAsync(ocrText ?? "", imageBase64);
             }
             catch (Exception ex)
             {
@@ -1855,26 +1836,29 @@ namespace SnapEye
             try
             {
                 ExpandSessionIfCollapsed();
-                ShowInlineError($"Extracting text from {batch.Count} screen{(batch.Count == 1 ? "" : "s")}…");
 
-                string?[] ocrTexts = await Task.WhenAll(
-                    batch.Select(p => screenCaptureService.SendToOcrAsync(p.Base64))).ConfigureAwait(true);
+                // Sequential OCR: parallel jobs thrash Tesseract in the container (60–90s+)
+                // and used to hit the old 30s client timeout → false "OCR found no text".
+                var ocrTexts = new string?[batch.Count];
+                var ocrErrors = new string?[batch.Count];
+                for (int i = 0; i < batch.Count; i++)
+                {
+                    ShowInlineError($"Extracting text from screen {i + 1}/{batch.Count}…");
+                    ocrTexts[i] = await screenCaptureService
+                        .SendToOcrAsync(batch[i].Base64, batch[i].SavedPath)
+                        .ConfigureAwait(true);
+                    ocrErrors[i] = screenCaptureService.LastOcrError;
+                }
 
-                bool inTranscript = TranscriptToggle.IsChecked == true;
                 var displayParts = new List<string>();
                 for (int i = 0; i < batch.Count; i++)
                 {
-                    string ocr = string.IsNullOrWhiteSpace(ocrTexts[i])
-                        ? "(OCR found no text)"
-                        : ocrTexts[i]!;
+                    string ocr = FormatOcrDisplay(ocrTexts[i], ocrErrors[i]);
                     displayParts.Add($"Screen {i + 1}:\n{ocr}");
                 }
 
                 string combinedDisplay = string.Join("\n\n---\n\n", displayParts);
-                if (inTranscript)
-                    AlphaRegion.AddScreenCaptureToTranscript(combinedDisplay);
-                else
-                    AlphaRegion.AddScreenCaptureToChat(combinedDisplay);
+                AlphaRegion.AddScreenCaptureToChat(combinedDisplay);
 
                 lastScreenOcr = string.Join("\n\n", ocrTexts.Where(t => !string.IsNullOrWhiteSpace(t)));
                 if (!string.IsNullOrWhiteSpace(lastScreenOcr) && IsListening && transcriptionService.IsConnected)
@@ -1884,7 +1868,7 @@ namespace SnapEye
                 pendingCaptures.Clear();
                 RefreshPendingCapturesUi();
 
-                await StreamAnswerForScreenCaptureBatchAsync(batch, ocrTexts, inTranscript).ConfigureAwait(true);
+                await StreamAnswerForScreenCaptureBatchAsync(batch, ocrTexts).ConfigureAwait(true);
             }
             catch (Exception ex)
             {
@@ -1900,19 +1884,26 @@ namespace SnapEye
             }
         }
 
-        private async Task StreamAnswerForScreenCaptureAsync(string ocrText, string? imageBase64, bool inTranscript)
+        private static string FormatOcrDisplay(string? ocrText, string? error)
+        {
+            if (ocrText == null)
+                return string.IsNullOrWhiteSpace(error)
+                    ? "(OCR failed — see status bar)"
+                    : $"(OCR failed: {error})";
+            if (string.IsNullOrWhiteSpace(ocrText))
+                return "(OCR found no text)";
+            return ocrText;
+        }
+
+        private async Task StreamAnswerForScreenCaptureAsync(string ocrText, string? imageBase64)
         {
             if (!await EnsureAuthTokenFreshAsync().ConfigureAwait(true))
                 return;
 
-            streamTarget = inTranscript ? StreamTarget.Transcript : StreamTarget.Chat;
-            SetLastQuestion("Based on the captured screen, explain what would help me right now.", inTranscript);
+            SetLastQuestion("Based on the captured screen, explain what would help me right now.", inTranscript: false);
 
             const string displayLabel = "Screen capture";
-            if (inTranscript)
-                AlphaRegion.BeginStreamingAnswerInTranscript(displayLabel);
-            else
-                AlphaRegion.BeginStreamingResponse(displayLabel);
+            AlphaRegion.BeginStreamingResponse(displayLabel);
 
             manualStreaming = true;
             UpdateStopButton();
@@ -1926,7 +1917,7 @@ namespace SnapEye
             bool hasImage = !string.IsNullOrEmpty(imageBase64);
             parts.AppendLine(hasImage ? "SCREEN CAPTURE (OCR, rough backup only):" : "SCREEN CAPTURE (OCR):");
             parts.AppendLine("---");
-            parts.AppendLine(string.IsNullOrWhiteSpace(ocrText) ? "(OCR found no text)" : ocrText);
+            parts.AppendLine(FormatOcrDisplay(ocrText, null));
             parts.AppendLine("---");
             parts.AppendLine(hasImage
                 ? "USER REQUEST: The attached image is my screen. Read it directly; the OCR text above is only a rough backup. Respond exactly as your system instructions say (for example, if it mentions LLD, HLD or system design, follow that section)."
@@ -1938,20 +1929,15 @@ namespace SnapEye
 
         private async Task StreamAnswerForScreenCaptureBatchAsync(
             IReadOnlyList<PendingCapture> batch,
-            IReadOnlyList<string?> ocrTexts,
-            bool inTranscript)
+            IReadOnlyList<string?> ocrTexts)
         {
             if (!await EnsureAuthTokenFreshAsync().ConfigureAwait(true))
                 return;
 
-            streamTarget = inTranscript ? StreamTarget.Transcript : StreamTarget.Chat;
-            SetLastQuestion($"Based on {batch.Count} captured screens, explain what would help me right now.", inTranscript);
+            SetLastQuestion($"Based on {batch.Count} captured screens, explain what would help me right now.", inTranscript: false);
 
             string displayLabel = batch.Count == 1 ? "Screen capture" : $"{batch.Count} screen captures";
-            if (inTranscript)
-                AlphaRegion.BeginStreamingAnswerInTranscript(displayLabel);
-            else
-                AlphaRegion.BeginStreamingResponse(displayLabel);
+            AlphaRegion.BeginStreamingResponse(displayLabel);
 
             manualStreaming = true;
             UpdateStopButton();
@@ -1965,9 +1951,7 @@ namespace SnapEye
 
             for (int i = 0; i < batch.Count; i++)
             {
-                string ocr = string.IsNullOrWhiteSpace(ocrTexts[i])
-                    ? "(OCR found no text)"
-                    : ocrTexts[i]!;
+                string ocr = FormatOcrDisplay(ocrTexts[i], null);
                 wireParts.Add(StreamingResponseService.MessagePart.TextBlock(
                     $"SCREEN CAPTURE {i + 1} of {batch.Count} (OCR, rough backup only):\n---\n{ocr}\n---"));
                 wireParts.Add(StreamingResponseService.MessagePart.ImagePng(batch[i].Base64));
@@ -2736,10 +2720,9 @@ namespace SnapEye
                 suppressAutoSuggestion = false;
                 autoStreaming = true;
                 UpdateStopButton();
-                AlphaRegion.SwitchToTranscriptionTab();
-                TranscriptToggle.IsChecked = true;
-                SetLastQuestion(question, inTranscript: true);
-                AlphaRegion.BeginStreamingAnswerInTranscript(question);
+                AlphaRegion.SwitchToChatTab();
+                SetLastQuestion(question, inTranscript: false);
+                AlphaRegion.BeginStreamingResponse(question);
             }));
         }
 
@@ -2750,7 +2733,7 @@ namespace SnapEye
             // BeginInvoke: tokens stream at 50+/sec from the WebSocket receive thread.
             // Synchronous Invoke would block that thread per token, building latency and
             // potentially starving the dispatcher under load.
-            Dispatcher.BeginInvoke(new Action(() => AlphaRegion.AppendStreamingAnswerToken(token)));
+            Dispatcher.BeginInvoke(new Action(() => AlphaRegion.AppendStreamingToken(token)));
         }
 
         private void OnAISuggestionConfidence(object? sender, double confidence)
@@ -2772,7 +2755,7 @@ namespace SnapEye
                 }
                 double? conf = pendingAutoConfidence;
                 pendingAutoConfidence = null;
-                AlphaRegion.EndStreamingAnswerInTranscript(
+                AlphaRegion.EndStreamingResponse(
                     string.IsNullOrEmpty(response) ? null : response, conf);
                 if (!string.IsNullOrWhiteSpace(response))
                     history.Append(ConversationMessageKind.AssistantAnswer, response);
@@ -2786,7 +2769,7 @@ namespace SnapEye
                 autoStreaming = false;
                 UpdateStopButton();
                 if (suppressAutoSuggestion) { suppressAutoSuggestion = false; return; }
-                AlphaRegion.ShowStreamingAnswerError(error);
+                AlphaRegion.ShowStreamingError(error);
             }));
         }
 
